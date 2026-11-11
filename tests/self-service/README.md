@@ -12,6 +12,7 @@ set first. The tests act as whatever identity that value names.
 | tenant-command-checks/      | Tenant admins create only labelled tenant commands and never update or delete one. No record, a record naming someone else, a non-owner of an existing tenant, and a suspended tenant are refused |
 | entitlement-writer/         | Only the entitlement writer creates records and it can do nothing else. A record with no tenant survives the reap |
 | owner-grant-before-install/ | The owner grant arrives only once the tenant install finishes                                           |
+| agent-parent/               | An agent command whose parent is a sub-agent, or that gives a parent to an agent with sub-agents, is refused. A sub-agent of a plain agent is admitted |
 | service-account-token/      | A tenant namespace refuses service-account-token Secrets, even from cluster-admin                       |
 | suspension/                 | LIVE: a suspended tenant refuses in-tenant commands. A second suspend keeps reap-after. Only the operator lifts it |
 | dex-password-writer/        | The Dex account writer creates Passwords in Dex's namespace and nothing else                            |

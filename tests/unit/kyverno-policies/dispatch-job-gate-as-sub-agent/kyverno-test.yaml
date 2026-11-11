@@ -1,0 +1,19 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: dispatch-job-gate-as-sub-agent
+# The creator is sub-agent sub's harness. A sub-agent has no sub-agents, so
+# it may not dispatch, even a Job that is well formed in every other way.
+policies:
+  - ../dispatch-job-gate/policy.yaml
+resources:
+  - jobs.yaml
+userinfo: ../capability-job-gate-as-sub-agent/user-harness-sub.yaml
+context: ../dispatch-job-gate/context.yaml
+variables: ../capability-job-gate-as-harness/values.yaml
+results:
+  - policy: cluster-dispatch-job-gate
+    kind: Job
+    result: fail
+    resources:
+      - tenant-offline/sub-agent-dispatch

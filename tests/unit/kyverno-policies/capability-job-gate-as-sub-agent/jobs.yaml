@@ -1,0 +1,76 @@
+# Admitted: the parent's workspace volume and the sub-agent's own Secret.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parent-workspace-own-secret
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ag-sub-unprivileged
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ag-research-workspace
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          env:
+            - name: T
+              valueFrom:
+                secretKeyRef:
+                  name: sub-secret
+                  key: t
+---
+# Denied: a sub-agent has no workspace volume of its own.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: own-agent-pvc
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ag-sub-unprivileged
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ag-sub-workspace
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+# Denied: the parent's Secret is not the sub-agent's.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parent-secret
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ag-sub-unprivileged
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          env:
+            - name: T
+              valueFrom:
+                secretKeyRef:
+                  name: approved-secret
+                  key: t

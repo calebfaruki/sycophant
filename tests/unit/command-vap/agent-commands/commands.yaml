@@ -399,3 +399,33 @@ metadata:
 data:
   model: 'a'
   archives: '1000'
+---
+# parent equals target: refused, an agent cannot be its own parent
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-4e5f5c10bd
+  annotations:
+    sycophant.md/target: parent-self
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  parent: 'parent-self'
+---
+# parent names another agent: admitted
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-agent-d21ab58c47
+  annotations:
+    sycophant.md/target: sub-ok
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  model: 'a'
+  parent: 'research'

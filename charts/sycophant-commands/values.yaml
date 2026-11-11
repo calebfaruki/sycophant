@@ -42,6 +42,7 @@
 #   model: ""               # exactly one model
 #   storage: 5Gi
 #   archives: 10            # archives kept on compact
+#   parent: ""              # the agent this one is a sub-agent of
 #   secret.<toolset>.<Secret name>: <path>
 #   egress.<toolset>: ""    # comma list of exact domains
 

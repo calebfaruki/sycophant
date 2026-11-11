@@ -36,6 +36,9 @@ metadata:
     {{- include "sycophant.labels" $ | nindent 4 }}
     sycophant.md/type: agent-sa
     sycophant.md/agent: {{ $name }}
+    {{- with .Values.command.parent }}
+    sycophant.md/parent: {{ . }}
+    {{- end }}
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1

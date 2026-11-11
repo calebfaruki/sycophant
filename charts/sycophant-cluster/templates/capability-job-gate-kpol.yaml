@@ -1,11 +1,11 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Identity-keyed admission gate on Job CREATE. Keys on the creator's
-# authenticated username (system:serviceaccount:<ns>:ag-<agent>). On
-# that event it mutates the Job's pod template into the hardened isolation
-# envelope, stamps the security labels from the identity, and validates the
-# result -- denying the Job on a missing envelope element, an off-allowlist
-# volume kind, an off-allowlist Secret name, a wrong pinned ServiceAccount, or a
-# bad job-kind.
+# Identity-keyed admission gate on Job CREATE, for every Job but a dispatch Job.
+# Keys on the creator's authenticated username
+# (system:serviceaccount:<ns>:ag-<agent>). On that event it mutates the Job's
+# pod template into the hardened isolation envelope, stamps the security labels
+# from the identity, and validates the result -- denying the Job on a missing
+# envelope element, an off-allowlist volume kind, an off-allowlist Secret name,
+# a wrong pinned ServiceAccount, or a bad job-kind.
 #
 # The mutate is additive: every envelope field is written through an optional so
 # it lands only where the creator left it absent. An explicitly hostile value is
@@ -27,15 +27,7 @@ spec:
   evaluation:
     background:
       enabled: false
-  matchConstraints:
-    namespaceSelector:
-      matchLabels:
-        app.kubernetes.io/part-of: sycophant-tenant
-    resourceRules:
-      - apiGroups: ["batch"]
-        apiVersions: ["v1"]
-        operations: ["CREATE"]
-        resources: ["jobs"]
+  {{- include "sycophant.tenantJobCreateMatch" . | nindent 2 }}
   {{- include "sycophant.capabilityJobGateIdentity" . | nindent 2 }}
   mutations:
     # Everything an apply configuration can express. Each envelope field is an
@@ -150,18 +142,17 @@ spec:
   evaluation:
     background:
       enabled: false
-  matchConstraints:
-    namespaceSelector:
-      matchLabels:
-        app.kubernetes.io/part-of: sycophant-tenant
-    resourceRules:
-      - apiGroups: ["batch"]
-        apiVersions: ["v1"]
-        operations: ["CREATE"]
-        resources: ["jobs"]
+  {{- include "sycophant.tenantJobCreateMatch" . | nindent 2 }}
   {{- include "sycophant.capabilityJobGateIdentity" . | nindent 2 }}
     - name: volumes
       expression: "variables.pod.?volumes.orValue([])"
+    # The workspace the Job mounts: a sub-agent's parent's, read from the label
+    # the agent chart puts on the creator's ServiceAccount, otherwise the
+    # creator's own.
+    - name: workspace
+      expression: >-
+        "ag-" + resource.get("v1", "serviceaccounts", request.namespace, "ag-" + variables.agent)
+          .?metadata.?labels["sycophant.md/parent"].orValue(variables.agent) + "-workspace"
     # Resolved only when a Secret is actually referenced: every use below sits
     # behind a short-circuit, so a Job naming no Secret needs no allowlist
     # object and an agent without one is not denied for that alone.
@@ -208,20 +199,18 @@ spec:
       message: >-
         capability-job pod volumes must be one of configMap, secret, projected,
         emptyDir, downwardAPI, or persistentVolumeClaim.
-    # The agent's data PVC is the only claim a tool job mounts, and its name
-    # is fixed by the chart as `ag-<agent>-data`. Deriving the
-    # approved name from the creating identity rather than reading it from a
-    # ConfigMap leaves no name to drift and no context source to go missing.
+    # The workspace is the only claim a tool job mounts.
     # Naming the claim outright is what keeps `ag-<agent>-conversation`
     # out: the harness's conversation history must never be reachable from the
     # untrusted runtime, which could otherwise forge it.
     - expression: >-
         variables.volumes.all(v,
           !has(v.persistentVolumeClaim)
-            || v.persistentVolumeClaim.claimName == "ag-" + variables.agent + "-data")
+            || v.persistentVolumeClaim.claimName == variables.workspace)
       message: >-
-        capability-job may mount only its own agent's data PVC; every
-        persistentVolumeClaim.claimName must be ag-<agent>-data.
+        capability-job may mount only its workspace; every
+        persistentVolumeClaim.claimName must be ag-<agent>-workspace, or
+        ag-<parent>-workspace for a sub-agent.
     # The harness mounts no ConfigMap into a tool job, so the approved set is
     # empty and every reference is denied. Covers the same sites the Secret
     # allowlist covers, because each is a way to read a ConfigMap's contents:

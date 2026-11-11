@@ -39,19 +39,15 @@ provisioned namespace out of the reserved ones.
 The capability job gate's creating identity, shared by its mutate and its
 validate so the two cannot drift onto different notions of "the agent".
 
-`parseServiceAccount` pulls NS/NAME out of `system:serviceaccount:NS:NAME`.
-The match conditions are the gate: the creator must be a ServiceAccount in the
-namespace it is writing to, and its name must be `ag-<agent>`. A Job
-from any other identity is not this gate's business and falls through to the
-rest of admission.
+The creator is a harness (sycophant.harnessCreatorCondition) and the Job is not
+a dispatch Job. Any other Job falls through.
 */}}
 {{- define "sycophant.capabilityJobGateIdentity" -}}
 matchConditions:
-  - name: creator-is-a-harness-in-this-namespace
+  {{- include "sycophant.harnessCreatorCondition" . | nindent 2 }}
+  - name: job-kind-is-not-dispatch
     expression: >-
-      request.userInfo.username.startsWith("system:serviceaccount:")
-        && parseServiceAccount(request.userInfo.username).Namespace == request.namespace
-        && parseServiceAccount(request.userInfo.username).Name.startsWith("ag-")
+      object.spec.template.metadata.?labels["sycophant.md/job-kind"].orValue("") != "dispatch"
 variables:
   - name: agent
     expression: >-
@@ -64,6 +60,60 @@ variables:
     expression: "variables.pod.?initContainers.orValue([])"
   - name: allContainers
     expression: "variables.containers + variables.initContainers"
+{{- end -}}
+
+{{/*
+The dispatch gate's creating identity, shared by its mutate and its validate.
+The creator is agent `ag-<agent>`'s harness, the Job is a dispatch Job, and it
+runs as sub-agent `ag-<sub>` at hostname `<sub>-<id>`.
+*/}}
+{{- define "sycophant.dispatchJobGateIdentity" -}}
+matchConditions:
+  {{- include "sycophant.harnessCreatorCondition" . | nindent 2 }}
+  - name: job-kind-is-dispatch
+    expression: >-
+      object.spec.template.metadata.?labels["sycophant.md/job-kind"].orValue("") == "dispatch"
+variables:
+  - name: agent
+    expression: >-
+      parseServiceAccount(request.userInfo.username).Name.substring(3)
+  - name: pod
+    expression: "object.spec.template.spec"
+  - name: serviceAccount
+    expression: 'variables.pod.?serviceAccountName.orValue("")'
+  - name: sub
+    expression: >-
+      variables.serviceAccount.startsWith("ag-") ? variables.serviceAccount.substring(3) : ""
+  - name: hostname
+    expression: 'variables.pod.?hostname.orValue("")'
+  - name: id
+    expression: >-
+      variables.sub != "" && variables.hostname.startsWith(variables.sub + "-")
+        ? variables.hostname.substring(size(variables.sub) + 1) : ""
+{{- end -}}
+
+{{/* What both Job gates match: a Job create in a tenant namespace. */}}
+{{- define "sycophant.tenantJobCreateMatch" -}}
+matchConstraints:
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sycophant-tenant
+  resourceRules:
+    - apiGroups: ["batch"]
+      apiVersions: ["v1"]
+      operations: ["CREATE"]
+      resources: ["jobs"]
+{{- end -}}
+
+{{/*
+The creator is a ServiceAccount `ag-<agent>` in the namespace it writes to.
+*/}}
+{{- define "sycophant.harnessCreatorCondition" -}}
+- name: creator-is-a-harness-in-this-namespace
+  expression: >-
+    request.userInfo.username.startsWith("system:serviceaccount:")
+      && parseServiceAccount(request.userInfo.username).Namespace == request.namespace
+      && parseServiceAccount(request.userInfo.username).Name.startsWith("ag-")
 {{- end -}}
 
 {{/* Match for the reactors on the tenant provision command in sycophant-system. */}}
@@ -519,11 +569,17 @@ roleRef:
   name: {{ .role }}
 {{- end -}}
 
-{{- /* The uninstall script for one kind; see sycophant.provisionUninstaller. */ -}}
+{{- /*
+The uninstall script for one kind; see sycophant.provisionUninstaller.
+beforeUninstall (optional) runs once NAME is set, before the release goes.
+*/ -}}
 {{- define "sycophant.provisionUninstallScript" -}}
 set -eu
 {{ include "sycophant.commandFetch" . }}
 {{ include "sycophant.releaseName" (dict "kind" .kind) }}
+{{- with .beforeUninstall }}
+{{ . }}
+{{- end }}
 helm uninstall "{{ include "sycophant.releasePrefix" .kind }}-$NAME" -n "$TENANT" --timeout 10m
 kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}

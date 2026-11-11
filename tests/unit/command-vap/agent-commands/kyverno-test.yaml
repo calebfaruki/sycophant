@@ -190,3 +190,15 @@ results:
   result: pass
   resources:
   - tenant-acme/provision-agent-06713697f9
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-agent-4e5f5c10bd
+- policy: command-provision-agent
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: pass
+  resources:
+  - tenant-acme/provision-agent-d21ab58c47

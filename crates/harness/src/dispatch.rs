@@ -199,7 +199,7 @@ impl DispatchState {
         scheduling: SchedulingConfig,
         toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
-        let workspace_pvc = format!("{AGENT_PREFIX}{agent}-data");
+        let workspace_pvc = format!("{AGENT_PREFIX}{agent}-workspace");
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
             result_txs: RwLock::new(HashMap::new()),

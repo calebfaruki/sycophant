@@ -1,0 +1,41 @@
+{{- if include "sycophant.renderKyverno" . }}
+# An agent command with `parent` makes its target a sub-agent of that agent.
+# A sub-agent has no sub-agents, read from live cluster state: the parent may
+# not be a sub-agent, and the target may not already be a parent. The agent
+# chart labels a sub-agent's ServiceAccount `ag-<name>` with
+# sycophant.md/parent. sycoadm and self-service write the same command, so this
+# one policy covers both. The lookups run only when the command names a parent.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: cluster-agent-parent
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" . "kind" "agent") | nindent 2 }}
+    - name: parent
+      expression: 'object.data.?parent.orValue("")'
+    - name: target
+      expression: 'object.metadata.?annotations["{{ include "sycophant.targetAnnotation" . }}"].orValue("")'
+    - name: parentSa
+      expression: >-
+        dyn(resource.get("v1", "serviceaccounts", variables.tenant, "ag-" + variables.parent))
+    - name: serviceAccounts
+      expression: >-
+        dyn(resource.list("v1", "serviceaccounts", variables.tenant)).?items.orValue([])
+  validations:
+    - expression: >-
+        variables.parent == "" || variables.parentSa == null ||
+        variables.parentSa.metadata.?labels["sycophant.md/parent"].orValue("") == ""
+      message: "an agent command's parent is a sub-agent, and a sub-agent has no sub-agents"
+    - expression: >-
+        variables.parent == "" ||
+        !variables.serviceAccounts.exists(s,
+          s.metadata.?labels["sycophant.md/parent"].orValue("") == variables.target)
+      message: "an agent command names a parent for an agent that has sub-agents, and a sub-agent has no sub-agents"
+{{- end }}

@@ -1,0 +1,19 @@
+# Denied: the creator ag-sub is itself a sub-agent. It dispatches its own child
+# subsub. Every other rule is met.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sub-agent-dispatch
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-subsub
+      hostname: subsub-0a1b2c3d
+      subdomain: ag-sub-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local

@@ -1,0 +1,10 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: UserInfo
+metadata:
+  name: ag-sub
+userInfo:
+  username: system:serviceaccount:tenant-offline:ag-sub
+  groups:
+    - system:serviceaccounts
+    - system:serviceaccounts:tenant-offline
+    - system:authenticated

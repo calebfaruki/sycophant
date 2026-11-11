@@ -225,7 +225,7 @@ variables.target.matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')`
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-agent" "prefix" true
   "command" (include "sycophant.agentProvisionCommandName" .) "noun" "agent" "action" "mint an agent"
-  "keys" (list "toolsets" "model" "storage" "archives")
+  "keys" (list "toolsets" "model" "storage" "archives" "parent")
   "keyPattern" `^(secret\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*|egress\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)$`
   "keyHelp" "secret.<toolset>.<secret-name> or egress.<toolset>"
   "targetRule" `variables.target.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
@@ -247,6 +247,11 @@ size(variables.target) <= 49`
     !has(object.data) || !('archives' in object.data) ||
     object.data['archives'].matches('^([1-9][0-9]{0,2}|1000)$')
   message: "an agent command's 'archives' must be a whole number from 1 to 1000 with no leading zero"
+- expression: >-
+    !has(object.data) || !('parent' in object.data) ||
+    (object.data['parent'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(object.data['parent']) <= 49 && object.data['parent'] != variables.target)
+  message: "an agent command's 'parent' must be a DNS-safe name of at most 49 characters other than its own target"
 - expression: >-
     !has(object.data) || object.data.all(k, !(k.startsWith('secret.') || k.startsWith('egress.')) ||
     k.split('.')[1] in object.data.?toolsets.orValue('').split(','))

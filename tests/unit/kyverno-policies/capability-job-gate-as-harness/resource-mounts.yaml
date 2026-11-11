@@ -14,7 +14,7 @@ spec:
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: ag-research-data
+            claimName: ag-research-workspace
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -39,7 +39,7 @@ spec:
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: ag-other-data
+            claimName: ag-other-workspace
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9

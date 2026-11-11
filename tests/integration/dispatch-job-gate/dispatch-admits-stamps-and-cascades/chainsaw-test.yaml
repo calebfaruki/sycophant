@@ -1,0 +1,184 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: dispatch-admits-stamps-and-cascades
+spec:
+  description: |
+    Agent probe's harness creates a dispatch Job for its sub-agent sub. The gate
+    admits it, stamps the dispatch labels and the ownerReference to SA ag-sub,
+    and the Job's pod is created. Deleting SA ag-sub then deletes the Job and
+    its pod.
+
+    Live-cluster test, justified: admission keys on the creating identity, and
+    the cascade is the garbage collector's. Neither runs in a render.
+
+    The Job carries a wrong `sycophant.md/agent: probe`. Only the stamp makes it
+    `sub`. Only the stamped `app.kubernetes.io/component: harness` lets the pod
+    mount `ag-probe-conversation` (conversation-log-mount-vap.yaml), so a
+    missing stamp also leaves the Job with no pod.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  steps:
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: seed-agent-and-sub-agent
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ag-probe
+                namespace: ($tenant_ns)
+                labels:
+                  sycophant.md/type: agent-sa
+                  sycophant.md/agent: probe
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ag-sub
+                namespace: ($tenant_ns)
+                labels:
+                  sycophant.md/type: agent-sa
+                  sycophant.md/agent: sub
+                  sycophant.md/parent: probe
+        # The gate reads the harness image from this Deployment. Zero replicas,
+        # so it runs nothing.
+        - apply:
+            template: true
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ag-probe
+                namespace: ($tenant_ns)
+              spec:
+                replicas: 0
+                selector:
+                  matchLabels:
+                    sycophant.md/agent: probe
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/agent: probe
+                  spec:
+                    containers:
+                      - name: harness
+                        image: sycophant-harness:local
+    - name: seed-job-create-identity
+      use:
+        template: ../../step-templates/toolset-secrets.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: secrets
+              value: {}
+    - name: parent-dispatches-sub-agent
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              out=$(mktemp)
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -o json -f - > "$out"
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: dispatch-sub
+              spec:
+                backoffLimit: 0
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/agent: probe
+                      sycophant.md/job-kind: dispatch
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: ag-sub
+                    automountServiceAccountToken: false
+                    hostname: sub-0a1b2c3d
+                    subdomain: ag-probe-dispatch
+                    containers:
+                      - name: harness
+                        image: sycophant-harness:local
+                        imagePullPolicy: Never
+                        securityContext:
+                          readOnlyRootFilesystem: true
+                          allowPrivilegeEscalation: false
+                          runAsNonRoot: true
+                          capabilities:
+                            drop: [ALL]
+                          seccompProfile:
+                            type: RuntimeDefault
+                        resources:
+                          limits:
+                            cpu: 250m
+                            memory: 128Mi
+                        volumeMounts:
+                          - name: conversation-data
+                            mountPath: /var/lib/harness
+                            subPath: sub/0a1b2c3d
+                    volumes:
+                      - name: conversation-data
+                        persistentVolumeClaim:
+                          claimName: ag-probe-conversation
+              MANIFEST
+              SUB_UID=$(kubectl get serviceaccount ag-sub -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+              python3 - "$out" "$SUB_UID" <<'PY'
+              import sys, json
+              job = json.load(open(sys.argv[1]))
+              labels = job["spec"]["template"]["metadata"].get("labels") or {}
+              want = {
+                  "app.kubernetes.io/component": "harness",
+                  "app.kubernetes.io/part-of": "sycophant",
+                  "sycophant.md/agent": "sub",
+                  "sycophant.md/parent": "probe",
+              }
+              got = {k: labels.get(k) for k in want}
+              assert got == want, f"labels not stamped: want {want}, got {got}"
+              refs = [
+                  (r.get("kind"), r.get("name"), r.get("uid"), r.get("blockOwnerDeletion"))
+                  for r in job["metadata"].get("ownerReferences") or []
+              ]
+              assert refs == [("ServiceAccount", "ag-sub", sys.argv[2], False)], \
+                  f"want one ownerReference to SA ag-sub, got {refs}"
+              print("OK")
+              PY
+              kubectl wait --for=create pod -l job-name=dispatch-sub -n "$TENANT_NS" --timeout=60s >/dev/null \
+                || { echo "the admitted dispatch Job created no pod"; kubectl describe job dispatch-sub -n "$TENANT_NS"; exit 1; }
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+    - name: deleting-the-sub-agent-deletes-its-dispatch
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              kubectl delete serviceaccount ag-sub -n "$TENANT_NS" >/dev/null
+              kubectl wait --for=delete job/dispatch-sub -n "$TENANT_NS" --timeout=60s >/dev/null \
+                || { echo "the dispatch Job outlived SA ag-sub"; exit 1; }
+              kubectl wait --for=delete pod -l job-name=dispatch-sub -n "$TENANT_NS" --timeout=60s >/dev/null \
+                || { echo "the dispatch pod outlived SA ag-sub"; exit 1; }
+            check:
+              ($error == null): true
+      catch:
+        - events:
+            namespace: ($tenant_ns)

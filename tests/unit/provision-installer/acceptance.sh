@@ -40,6 +40,9 @@ case "$*" in
   *"get deployment"*)
     [ -n "$GET_DEPLOY_EXIT" ] && exit "$GET_DEPLOY_EXIT"
     printf 'deployment.apps/ag-one\n' ;;
+  # The target's two sub-agents, and only under the target's parent label.
+  *"get serviceaccounts"*"sycophant.md/parent=$STUB_TARGET"*"-o name"*)
+    printf 'serviceaccount/ag-sub-a\nserviceaccount/ag-sub-b\n' ;;
 esac
 exit 0
 SH
@@ -541,7 +544,6 @@ check(
     "and hands it the command data",
     problems)
 
-# Every reap kind shares the uninstall script body; agent stands for all.
 kind = "agent"
 docs = generated(f"reap-{kind}")
 command = cases[kind]["command"].replace("provision-", "reap-")
@@ -584,6 +586,33 @@ if job:
 else:
     bad(removes, "no uninstall Job")
     bad(leaves, "no uninstall Job")
+
+# The stub kubectl lists sub-agents ag-sub-a and ag-sub-b under
+# sycophant.md/parent=one.
+def uninstalls(calls, release):
+    return [i for i, a in enumerate(calls)
+            if a[:2] == ["helm", "uninstall"] and release in a
+            and in_ns(a, "tenant-acme")]
+cascade = "agent: uninstall removes each sub-agent's release before the agent's"
+stops = "agent: a failed sub-agent uninstall never uninstalls the agent"
+stops += " and leaves its reap command"
+if job:
+    rc, calls = run_job(job, 0)
+    subs = uninstalls(calls, "ag-sub-a") + uninstalls(calls, "ag-sub-b")
+    parent = uninstalls(calls, "ag-one")
+    check(cascade, None if rc == 0 and uninstalls(calls, "ag-sub-a")
+          and uninstalls(calls, "ag-sub-b") and parent
+          and max(subs) < min(parent)
+          else f"rc={rc}, calls={show(calls)}")
+    rc, calls = run_job(job, 1)
+    tried = uninstalls(calls, "ag-sub-a") + uninstalls(calls, "ag-sub-b")
+    check(stops, None if rc != 0 and tried
+          and not uninstalls(calls, "ag-one")
+          and not command_deletes(calls, command, "tenant-acme")
+          else f"rc={rc}, calls={show(calls)}")
+else:
+    bad(cascade, "no uninstall Job")
+    bad(stops, "no uninstall Job")
 
 reap = policy(kind, "DeletingPolicy", f"reap-{kind}")
 name = f"{kind}: the scheduled sweep selects the uninstall identity"

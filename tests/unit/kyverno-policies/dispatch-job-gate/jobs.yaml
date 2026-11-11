@@ -1,0 +1,391 @@
+# Admitted: agent par dispatches its own sub-agent sub in the dispatch shape.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: well-formed
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      initContainers:
+        - name: instructions-sync
+          image: sycophant-harness:local
+          command: ["/bin/rclone"]
+          volumeMounts:
+            - name: objectstore-token
+              mountPath: /var/run/secrets/objectstore
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+          volumeMounts:
+            - name: conversation-data
+              mountPath: /var/lib/harness
+              subPath: sub/0a1b2c3d
+            - name: instructions
+              mountPath: /etc/instructions/sub
+      volumes:
+        - name: conversation-data
+          persistentVolumeClaim:
+            claimName: ag-par-conversation
+        - name: instructions
+          emptyDir: {}
+        - name: objectstore-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: sycophant-objectstore
+---
+# Denied: the harness container runs an image other than the agent's harness
+# image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: harness-wrong-image
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: registry.k8s.io/pause:3.9
+---
+# Denied: instructions-sync runs an image other than the agent's harness image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sync-wrong-image
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      initContainers:
+        - name: instructions-sync
+          image: rclone/rclone:1.75.1
+          command: ["/bin/rclone"]
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: instructions-sync runs a shell, not /bin/rclone.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sync-not-rclone
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      initContainers:
+        - name: instructions-sync
+          image: sycophant-harness:local
+          command: ["/bin/sh", "-c"]
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: a container beyond harness and instructions-sync runs another image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: extra-container
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+        - name: sidecar
+          image: registry.k8s.io/pause:3.9
+---
+# Denied: no container is named harness. The one container is named runtime.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: missing-harness
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: runtime
+          image: sycophant-harness:local
+---
+# Denied: ag-alien is a sub-agent of agent other, not of par.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: another-agents-sub-agent
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-alien
+      hostname: alien-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: ag-plain carries no parent label, so it is not a sub-agent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: not-a-sub-agent
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-plain
+      hostname: plain-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: the harness container takes an env var from a Secret.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secret-env
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+          env:
+            - name: TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ts-web-token
+                  key: token
+---
+# Denied: the conversation mount's subPath is not the dispatch's own folder.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: subpath-not-own-folder
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+          volumeMounts:
+            - name: conversation-data
+              mountPath: /var/lib/harness
+              subPath: sub
+      volumes:
+        - name: conversation-data
+          persistentVolumeClaim:
+            claimName: ag-par-conversation
+---
+# Denied: the hostname's id is not 8 hex characters.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hostname-not-hex-id
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-xyz
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: a Secret volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secret-volume
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+      volumes:
+        - name: s
+          secret:
+            secretName: s
+---
+# Denied: a Secret in a projected volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secret-projected
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+      volumes:
+        - name: s
+          projected:
+            sources:
+              - secret:
+                  name: s
+---
+# Denied: a Secret through envFrom.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secret-envfrom
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+          envFrom:
+            - secretRef:
+                name: s
+---
+# Denied: an image pull Secret.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secret-image-pull
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      imagePullSecrets:
+        - name: s
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+---
+# Denied: a volume of a claim other than the agent's conversation volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: other-claim
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-par-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local
+      volumes:
+        - name: c
+          persistentVolumeClaim:
+            claimName: ag-other-conversation
+---
+# Denied: a subdomain other than ag-<agent>-dispatch.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wrong-subdomain
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: dispatch
+    spec:
+      serviceAccountName: ag-sub
+      hostname: sub-0a1b2c3d
+      subdomain: ag-other-dispatch
+      containers:
+        - name: harness
+          image: sycophant-harness:local

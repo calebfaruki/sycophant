@@ -5,6 +5,11 @@ metadata:
 spec:
   resources:
     - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-research
+        namespace: tenant-offline
+    - apiVersion: v1
       kind: ConfigMap
       metadata:
         name: inf-deepseek
@@ -31,3 +36,19 @@ spec:
           sycophant.md/type: toolset-secrets
       data:
         other-secret: tool
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-sub
+        namespace: tenant-offline
+        labels:
+          sycophant.md/parent: research
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ag-sub-toolset-secrets
+        namespace: tenant-offline
+        labels:
+          sycophant.md/type: toolset-secrets
+      data:
+        sub-secret: tool

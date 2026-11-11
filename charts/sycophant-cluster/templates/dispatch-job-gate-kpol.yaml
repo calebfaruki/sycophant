@@ -1,0 +1,156 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Identity-keyed admission gate on dispatch Job CREATE. An agent's harness
+# starts one of its sub-agents as a Job in its own namespace. The pod runs as
+# the sub-agent's ServiceAccount, on the agent's harness image, with the agent's
+# conversation volume at the sub-agent's own subPath. The mutate stamps the
+# pod's identity labels and makes the Job owned by the sub-agent's
+# ServiceAccount, so deleting the sub-agent deletes its Jobs and pods. The pod
+# does not carry the agent's own label, so the agent's Deployment and relay
+# Service never select it. The validate denies every Job outside that shape.
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: cluster-dispatch-job-gate-envelope
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  {{- include "sycophant.tenantJobCreateMatch" . | nindent 2 }}
+  {{- include "sycophant.dispatchJobGateIdentity" . | nindent 2 }}
+  mutations:
+    # Authored from the creating identity and the pinned ServiceAccount, so
+    # they overwrite any carried value. A map merges by key, so the creator's
+    # other labels survive.
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{
+            spec: Object.spec{
+              template: Object.spec.template{
+                metadata: Object.spec.template.metadata{
+                  labels: {
+                    "app.kubernetes.io/component": "harness",
+                    "app.kubernetes.io/part-of": "sycophant",
+                    "sycophant.md/agent": variables.sub,
+                    "sycophant.md/parent": variables.agent
+                  }
+                }
+              }
+            }
+          }
+    # The one owner, replacing any the creator set.
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: >-
+          [
+            JSONPatch{
+              op: "add",
+              path: "/metadata/ownerReferences",
+              value: [{
+                "apiVersion": dyn("v1"),
+                "kind": dyn("ServiceAccount"),
+                "name": dyn("ag-" + variables.sub),
+                "uid": resource.get("v1", "serviceaccounts", request.namespace, "ag-" + variables.sub).metadata.uid,
+                "blockOwnerDeletion": dyn(false)
+              }]
+            }
+          ]
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: cluster-dispatch-job-gate
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  {{- include "sycophant.tenantJobCreateMatch" . | nindent 2 }}
+  {{- include "sycophant.dispatchJobGateIdentity" . | nindent 2 }}
+    - name: containers
+      expression: "variables.pod.containers"
+    - name: initContainers
+      expression: "variables.pod.?initContainers.orValue([])"
+    - name: allContainers
+      expression: "variables.containers + variables.initContainers"
+    - name: volumes
+      expression: "variables.pod.?volumes.orValue([])"
+    - name: creatorSa
+      expression: >-
+        dyn(resource.get("v1", "serviceaccounts", request.namespace, "ag-" + variables.agent))
+    - name: subSa
+      expression: >-
+        dyn(resource.get("v1", "serviceaccounts", request.namespace, variables.serviceAccount))
+    - name: deployment
+      expression: >-
+        dyn(resource.get("apps/v1", "deployments", request.namespace, "ag-" + variables.agent))
+    - name: harnessImages
+      expression: >-
+        variables.deployment == null ? [] :
+          variables.deployment.spec.template.spec.containers
+            .filter(c, c.name == "harness").map(c, c.image)
+    - name: conversationVolumes
+      expression: >-
+        variables.volumes.filter(v, has(v.persistentVolumeClaim)).map(v, v.name)
+  validations:
+    - expression: >-
+        variables.creatorSa != null &&
+          variables.creatorSa.metadata.?labels["sycophant.md/parent"].orValue("") == ""
+      message: >-
+        a sub-agent may not dispatch: a sub-agent has no sub-agents.
+    - expression: >-
+        variables.sub != "" && variables.subSa != null &&
+          variables.subSa.metadata.?labels["sycophant.md/parent"].orValue("") == variables.agent
+      message: >-
+        a dispatch Job must run as ag-<sub>, the ServiceAccount of one of the
+        creating agent's own sub-agents.
+    - expression: >-
+        size(variables.harnessImages) == 1
+          && variables.containers.exists(c, c.name == "harness")
+          && variables.allContainers.all(c, c.?image.orValue("") == variables.harnessImages[0])
+      message: >-
+        a dispatch Job must have a container named harness, and every container
+        must run the image of container harness in the agent's Deployment.
+    - expression: >-
+        variables.allContainers.all(c, c.name != "instructions-sync"
+          || c.?command.orValue([]) == ["/bin/rclone"])
+      message: >-
+        a dispatch Job's instructions-sync container must run /bin/rclone
+        directly.
+    - expression: >-
+        variables.id.matches("^[a-f0-9]{8}$")
+          && variables.pod.?subdomain.orValue("") == "ag-" + variables.agent + "-dispatch"
+      message: >-
+        a dispatch Job must set hostname <sub>-<id>, where id is 8 lowercase hex
+        characters, and subdomain ag-<agent>-dispatch.
+    - expression: >-
+        variables.volumes.all(v, !has(v.persistentVolumeClaim)
+          || v.persistentVolumeClaim.claimName == "ag-" + variables.agent + "-conversation")
+          && variables.allContainers.all(c, c.?volumeMounts.orValue([]).all(m,
+               !(m.name in variables.conversationVolumes)
+                 || m.?subPath.orValue("") == variables.sub + "/" + variables.id))
+      message: >-
+        a dispatch Job may mount only the agent's conversation volume
+        ag-<agent>-conversation, and every mount of it must set subPath
+        <sub>/<id>.
+    # A harness holds no Secret, so no Secret is approved: every site a
+    # Secret can be named is denied.
+    - expression: >-
+        variables.volumes.all(v, !has(v.secret))
+          && variables.volumes.all(v,
+               !has(v.projected) || v.projected.?sources.orValue([]).all(s, !has(s.secret)))
+          && variables.allContainers.all(c,
+               c.?env.orValue([]).all(e,
+                 !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)))
+          && variables.allContainers.all(c,
+               c.?envFrom.orValue([]).all(f, !has(f.secretRef)))
+          && variables.pod.?imagePullSecrets.orValue([]).size() == 0
+      message: >-
+        a dispatch Job must not reference a Secret: a harness holds no Secret.
+{{- end }}

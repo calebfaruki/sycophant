@@ -651,7 +651,7 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            "ag-test-data",
+            "ag-test-workspace",
             &SchedulingConfig::default(),
             &[],
         )
@@ -692,7 +692,7 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            "ag-test-data",
+            "ag-test-workspace",
             &SchedulingConfig::default(),
             &secrets,
         );
@@ -905,7 +905,7 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            "ag-test-data",
+            "ag-test-workspace",
             &SchedulingConfig::default(),
             secrets,
         )

@@ -56,11 +56,11 @@ test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 test-unit-go: ## Go unit tests for the syco CLI
 	cd cmd/syco && go test ./...
 
-# The two policy fixtures are rendered from the chart on every run and are not
+# The policy fixtures are rendered from the chart on every run and are not
 # tracked. `--api-versions` stands in for the Kyverno CRDs. The acceptance
 # suites render the charts themselves. No cluster is contacted.
 .PHONY: test-unit-k8s
-test-unit-k8s: ## Render the two policy fixtures, run them, then the chart acceptance suites
+test-unit-k8s: ## Render the policy fixtures, run them, then the chart acceptance suites
 	@helm template c charts/sycophant-cluster -n kyverno \
 		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
 		--show-only templates/capability-job-gate-kpol.yaml \
@@ -69,6 +69,10 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the chart accep
 		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
 		--show-only templates/protect-security-kpol.yaml \
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
+	@helm template c charts/sycophant-cluster -n kyverno \
+		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
+		--show-only templates/dispatch-job-gate-kpol.yaml \
+		> tests/unit/kyverno-policies/dispatch-job-gate/policy.yaml
 	@rc=0; \
 	kyverno test tests/unit/kyverno-policies || rc=1; \
 	for s in tests/unit/*/acceptance.sh; do bash "$$s" || rc=1; done; \

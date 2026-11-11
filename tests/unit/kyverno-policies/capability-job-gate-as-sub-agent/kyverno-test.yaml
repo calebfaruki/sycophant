@@ -1,0 +1,26 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: capability-job-gate-as-sub-agent
+# The creator is sub-agent `sub`, whose ServiceAccount names agent `research`
+# as its parent. Its tool Jobs mount the parent's workspace volume and only
+# the sub-agent's own Secrets.
+policies:
+  - ../capability-job-gate-as-harness/policy.yaml
+resources:
+  - jobs.yaml
+userinfo: user-harness-sub.yaml
+context: ../capability-job-gate-as-harness/context.yaml
+variables: ../capability-job-gate-as-harness/values.yaml
+results:
+  - policy: cluster-capability-job-gate
+    kind: Job
+    result: pass
+    resources:
+      - tenant-offline/parent-workspace-own-secret
+  - policy: cluster-capability-job-gate
+    kind: Job
+    result: fail
+    resources:
+      - tenant-offline/own-agent-pvc
+      - tenant-offline/parent-secret

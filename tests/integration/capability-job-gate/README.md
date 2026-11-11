@@ -1,14 +1,15 @@
 # capability-job-gate
 
-An admission gate on Job create keys on the creator's identity,
-`system:serviceaccount:<ns>:ag-<agent>`. It forces the Job's pod template into a
-hardened sandbox with no RBAC, bounded to the agent's approved Secrets, or
-denies the Job. Two per-agent ServiceAccounts split creating from executing.
-`ag-<agent>` creates Jobs. `ag-<agent>-unprivileged` holds no RBAC and
-automounts no token.
+An admission gate on Job create, other than a dispatch Job, keys on the
+creator's identity, `system:serviceaccount:<ns>:ag-<agent>`. It forces the
+Job's pod template into a hardened sandbox with no RBAC, bounded to the
+agent's approved Secrets, or denies the Job. Two per-agent ServiceAccounts
+split creating from executing. `ag-<agent>` creates Jobs.
+`ag-<agent>-unprivileged` holds no RBAC and automounts no token.
 
-It never keys on a self-asserted pod label. Agent A's Job may mount only A's
-approved Secret names, read from the `ag-<agent>-toolset-secrets` ConfigMap.
+It never takes the agent from a self-asserted pod label. Agent A's Job may
+mount only A's approved Secret names, read from the
+`ag-<agent>-toolset-secrets` ConfigMap.
 
 ## Denial contract
 

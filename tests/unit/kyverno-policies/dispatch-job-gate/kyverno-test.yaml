@@ -1,0 +1,39 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: dispatch-job-gate
+# The creator is agent par's harness. Each denied Job breaks one rule of the
+# dispatch pod shape and meets every other.
+policies:
+  - policy.yaml
+resources:
+  - jobs.yaml
+userinfo: user-harness-par.yaml
+context: context.yaml
+variables: ../capability-job-gate-as-harness/values.yaml
+results:
+  - policy: cluster-dispatch-job-gate
+    kind: Job
+    result: pass
+    resources:
+      - tenant-offline/well-formed
+  - policy: cluster-dispatch-job-gate
+    kind: Job
+    result: fail
+    resources:
+      - tenant-offline/harness-wrong-image
+      - tenant-offline/sync-wrong-image
+      - tenant-offline/sync-not-rclone
+      - tenant-offline/extra-container
+      - tenant-offline/missing-harness
+      - tenant-offline/another-agents-sub-agent
+      - tenant-offline/not-a-sub-agent
+      - tenant-offline/secret-env
+      - tenant-offline/subpath-not-own-folder
+      - tenant-offline/hostname-not-hex-id
+      - tenant-offline/secret-volume
+      - tenant-offline/secret-projected
+      - tenant-offline/secret-envfrom
+      - tenant-offline/secret-image-pull
+      - tenant-offline/other-claim
+      - tenant-offline/wrong-subdomain

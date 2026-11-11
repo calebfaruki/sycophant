@@ -475,7 +475,7 @@ expect agent-commands provision-agent-9ab9e6c844 \
   "'secret.hello-world.demo-key' must not be a reserved mount path"
 expect agent-commands provision-agent-b8489bb62f \
   "two Secrets of one toolset on one path"
-allowed_keys="allowed keys are toolsets, model, storage, archives,"
+allowed_keys="allowed keys are toolsets, model, storage, archives, parent,"
 allowed_keys+=" secret.<toolset>.<secret-name> or egress.<toolset>"
 expect agent-commands provision-agent-3c327826a7 \
   "unknown key 'secret.hello-world.Demo_Key'; $allowed_keys"
@@ -504,6 +504,9 @@ expect agent-commands provision-agent-b9ed80d2e7 "$archives_rule"
 expect agent-commands provision-agent-85560b3a97 ""
 expect agent-commands provision-agent-6392fd4c30 ""
 expect agent-commands provision-agent-06713697f9 ""
+# A sub-agent names its parent. The parent is never the target itself.
+expect agent-commands provision-agent-4e5f5c10bd "command's 'parent'"
+expect agent-commands provision-agent-d21ab58c47 ""
 # The same rules hold for a self-service sender: an issuer-prefixed tenant
 # owner on the selfService render.
 expect agent-self-service provision-agent-83ff6c98de \

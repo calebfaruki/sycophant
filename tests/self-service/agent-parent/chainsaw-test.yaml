@@ -1,0 +1,66 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: agent-parent
+spec:
+  description: >
+    The tenant owner's agent command may name a parent. It is refused when the
+    parent is itself a sub-agent, and when the target already has sub-agents.
+    A sub-agent of a plain agent is admitted. Each command is a server dry run,
+    so admission runs and no installer starts.
+  timeouts:
+    exec: 120s
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: setup
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NS="tenant-$(tenant_hash "$A" "q$TOKEN")"
+              tenant_ns "$NS" "$A" | kubectl apply -f - >/dev/null
+              # What the installer does after its helm upgrade --install
+              # succeeds.
+              kubectl create configmap provision-tenant-owner -n "$NS" >/dev/null
+              wait_owner_grant "$NS" "$A"
+              # Agent par, and its sub-agent sub, as the agent chart labels
+              # them.
+              kubectl create serviceaccount ag-par -n "$NS" >/dev/null
+              kubectl label serviceaccount ag-par -n "$NS" sycophant.md/type=agent-sa sycophant.md/agent=par >/dev/null
+              kubectl create serviceaccount ag-sub -n "$NS" >/dev/null
+              kubectl label serviceaccount ag-sub -n "$NS" sycophant.md/type=agent-sa sycophant.md/agent=sub \
+                sycophant.md/parent=par >/dev/null
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              kubectl delete namespace "tenant-$(tenant_hash "$A" "q$TOKEN")" --ignore-not-found --wait=false
+    - name: parent-refusals-and-a-sub-agent-of-a-plain-agent-is-admitted
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              A=$(user "alice-$TOKEN")
+              NS="tenant-$(tenant_hash "$A" "q$TOKEN")"
+              labelled_command provision-agent fresh model=a parent=sub | refused "is a sub-agent" \
+                "the owner's agent command whose parent is a sub-agent" \
+                kubectl create --dry-run=server -n "$NS" --as="$A" -f -
+              labelled_command provision-agent par model=a parent=fresh | refused "has sub-agents" \
+                "the owner's agent command giving a parent to an agent with sub-agents" \
+                kubectl create --dry-run=server -n "$NS" --as="$A" -f -
+              labelled_command provision-agent fresh model=a parent=par \
+                | kubectl create --dry-run=server -n "$NS" --as="$A" -f - >/dev/null \
+                || { echo "the owner's sub-agent of agent par was refused"; exit 1; }

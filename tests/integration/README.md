@@ -17,7 +17,8 @@ named security property.
 | conversation-log-mount/         | Only the harness may mount the `ag-*-conversation` PVC   |
 | user-reach/                     | A bound subject reaches exactly the listed agents; bindings and identity data follow the user command |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied; a toolset pod reaches only its domains |
-| capability-job-gate/            | Jobs created by `ag-<agent>` are forced into the hardened envelope and Secret allowlist, or denied |
+| capability-job-gate/            | Jobs other than a dispatch Job created by `ag-<agent>` are forced into the hardened envelope and Secret allowlist, or denied |
+| dispatch-job-gate/              | An agent's dispatch Job for its sub-agent is admitted, stamped and owned by SA `ag-<sub>`, and goes when that SA goes |
 | instructions-read-contract/     | Store-agnostic read contract (S3 and STS only): an agent pod's own token reads exactly its instructions folder, and nothing is written |
 
 ## Picking a bucket for a new test

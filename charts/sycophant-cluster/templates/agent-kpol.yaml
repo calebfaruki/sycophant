@@ -7,7 +7,15 @@ ServiceAccounts and RoleBindings.
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "agent") }}
 ---
-{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "agent") }}
+{{- /*
+An agent's sub-agents go first: each sub-agent's release is named after its
+ServiceAccount, which carries sycophant.md/parent.
+*/}}
+{{- $subAgents := `SUBS="$(kubectl get serviceaccounts -n "$TENANT" -l "sycophant.md/parent=$NAME" -o name)"
+for SA in $SUBS; do
+  helm uninstall "${SA#serviceaccount/}" -n "$TENANT" --timeout 10m
+done` }}
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "agent" "script" (include "sycophant.provisionUninstallScript" (dict "kind" "agent" "beforeUninstall" $subAgents))) }}
 ---
 {{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "agent") }}
 {{- end }}

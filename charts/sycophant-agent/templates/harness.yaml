@@ -22,11 +22,15 @@ first harness boot when audience verification fails.
 {{- $m := .Values.command }}
 {{- $secrets := dict }}
 {{- range $k, $v := $m }}{{ if hasPrefix "secret." $k }}{{ $_ := set $secrets $k $v }}{{ end }}{{ end }}
+{{- /*
+A sub-agent has no volumes, no Deployment and no relay Service of its own.
+*/}}
+{{- if not $m.parent }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ag-{{ $name }}-data
+  name: ag-{{ $name }}-workspace
   namespace: {{ $.Release.Namespace }}
   annotations:
     # Survive `helm uninstall` — irreplaceable user data (agent workspace files).
@@ -282,6 +286,7 @@ spec:
     app.kubernetes.io/part-of: sycophant
   ports:
     - { name: relay-fwd, port: 9091, targetPort: relay-fwd }
+{{- end }}
 ---
 # Per-agent headless Service publishing one per-pod DNS record per
 # capability-job pod: `<pod-hostname>.<this-service>.<ns>.svc.cluster.local`,

@@ -61,7 +61,7 @@ record() {
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: $1
+  name: "$1"
   namespace: sycophant-entitlements
 data:
   owner: "$2"
@@ -75,7 +75,7 @@ tenant_ns() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: $1
+  name: "$1"
   labels:
     app.kubernetes.io/part-of: sycophant-tenant
     pod-security.kubernetes.io/enforce: restricted

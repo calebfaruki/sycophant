@@ -1,0 +1,63 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Context
+metadata:
+  name: context
+spec:
+  resources:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-par
+        namespace: tenant-offline
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-sub
+        namespace: tenant-offline
+        uid: 22222222-2222-2222-2222-222222222222
+        labels:
+          sycophant.md/parent: par
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-alien
+        namespace: tenant-offline
+        uid: 33333333-3333-3333-3333-333333333333
+        labels:
+          sycophant.md/parent: other
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-plain
+        namespace: tenant-offline
+        uid: 44444444-4444-4444-4444-444444444444
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: ag-subsub
+        namespace: tenant-offline
+        uid: 55555555-5555-5555-5555-555555555555
+        labels:
+          sycophant.md/parent: sub
+    - apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ag-par
+        namespace: tenant-offline
+      spec:
+        template:
+          spec:
+            containers:
+              - name: harness
+                image: sycophant-harness:local
+    - apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ag-sub
+        namespace: tenant-offline
+      spec:
+        template:
+          spec:
+            containers:
+              - name: harness
+                image: sycophant-harness:local

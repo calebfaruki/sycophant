@@ -57,6 +57,8 @@ render remote-ip inference --set name=ipdirect --set-json "command=$REMOTE_IP"
 render toolset toolset --set name=git --set-json "command=$TOOLSET"
 render agent agent --set name=one --set-json "command=$AGENT"
 render agbase agent --set name=one --set-json 'command={"model":"a"}'
+# editorconfig-checker-disable-next-line
+render subagent agent --set name=sub --set-json 'command={"toolsets":"ssh","model":"a","parent":"one","secret.ssh.sub-key":"/home/agent/.ssh/id","egress.ssh":"example.com"}'
 render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
 render user-missing-ag user --set-string name="$HASH" \
   --set-json "command=$USER_MISSING_AG"
@@ -663,14 +665,14 @@ check(
     "<bucket>/system:serviceaccount:<ns>:ag-<agent>/ into an emptyDir",
     "agent", command_instructions_sync)
 
-def command_data_size(docs):
-    pvc = get(docs, "PersistentVolumeClaim", "ag-one-data")
+def command_workspace_size(docs):
+    pvc = get(docs, "PersistentVolumeClaim", "ag-one-workspace")
     size = ((pvc or {}).get("spec", {}).get("resources", {}).get("requests", {})
             .get("storage"))
     return (None if size == "5Gi"
-            else f"ag-one-data must request the command's 5Gi; got {size}")
-check("an agent command sizes its data volume at 5Gi", "agent",
-      command_data_size)
+            else f"ag-one-workspace must request the command's 5Gi; got {size}")
+check("an agent command sizes its workspace at 5Gi", "agent",
+      command_workspace_size)
 
 AGENT_OBJECTS = sorted([
     "CiliumNetworkPolicy/ag-one-egress",
@@ -678,7 +680,8 @@ AGENT_OBJECTS = sorted([
     "CiliumNetworkPolicy/ag-one-toolset-ssh-egress",
     "ConfigMap/ag-one-toolset-secrets", "Deployment/ag-one",
     "PersistentVolumeClaim/ag-one-conversation",
-    "PersistentVolumeClaim/ag-one-data", "Role/ag-one", "Role/ag-one-reach",
+    "PersistentVolumeClaim/ag-one-workspace",
+    "Role/ag-one", "Role/ag-one-reach",
     "RoleBinding/ag-one",
     "Service/ag-one", "Service/ag-one-capability",
     "ServiceAccount/ag-one", "ServiceAccount/ag-one-unprivileged"])
@@ -999,34 +1002,76 @@ check(
     "restricted PSA labels",
     "ns", tenant_ns)
 
-def agent_identities(docs):
-    sas = {
-        d["metadata"]["name"]: d for d in docs
-        if d["kind"] == "ServiceAccount"
-    }
-    if (any((d["metadata"].get("labels") or {}).get("sycophant.md/type")
-            != "agent-sa" for d in sas.values())):
-        return (
-            "every agent ServiceAccount must carry sycophant.md/type: agent-sa")
-    if (sas["ag-one-unprivileged"].get("automountServiceAccountToken")
-        is not False):
-        return "ag-one-unprivileged must not automount a token"
-    rules = sorted(
-        (
-            tuple(r.get("apiGroups") or []),
-            tuple(r.get("resources") or []),
-            tuple(sorted(r.get("verbs") or []))
+def agent_identities(n, parent=None):
+    def fn(docs):
+        sas = {
+            d["metadata"]["name"]: d for d in docs
+            if d["kind"] == "ServiceAccount"
+        }
+        if (any((d["metadata"].get("labels") or {}).get("sycophant.md/type")
+                != "agent-sa" for d in sas.values())):
+            return ("every agent ServiceAccount must carry "
+                    "sycophant.md/type: agent-sa")
+        if (sas[f"ag-{n}-unprivileged"].get("automountServiceAccountToken")
+            is not False):
+            return f"ag-{n}-unprivileged must not automount a token"
+        labels = sas[f"ag-{n}"]["metadata"].get("labels") or {}
+        got = labels.get("sycophant.md/parent")
+        if got != parent:
+            return f"ag-{n} sycophant.md/parent must be {parent}, got {got}"
+        rules = sorted(
+            (
+                tuple(r.get("apiGroups") or []),
+                tuple(r.get("resources") or []),
+                tuple(sorted(r.get("verbs") or []))
+            )
+            for r in get(docs, "Role", f"ag-{n}").get("rules") or []
         )
-        for r in get(docs, "Role", "ag-one").get("rules") or []
-    )
-    want = (sorted([(("batch",), ("jobs",), ("create",)),
-                    (("",), ("configmaps",), ("list", "watch"))]))
-    return (None if rules == want
-            else f"harness Role must be exactly {want}, got {rules}")
+        want = (sorted([(("batch",), ("jobs",), ("create",)),
+                        (("",), ("configmaps",), ("list", "watch"))]))
+        return (None if rules == want
+                else f"harness Role must be exactly {want}, got {rules}")
+    return fn
 check(
     "agent ServiceAccounts are labelled, the unprivileged one mounts no token, "
-    "the harness Role only creates Jobs",
-    "agent", agent_identities)
+    "ag-one names no parent, and the harness Role is exactly: create Jobs, "
+    "list and watch ConfigMaps",
+    "agent", agent_identities("one"))
+check(
+    "a sub-agent's ServiceAccounts are labelled, the unprivileged one mounts "
+    "no token, ag-sub names its parent, and its Role is the agent's Role: "
+    "create Jobs, list and watch ConfigMaps, no delete",
+    "subagent", agent_identities("sub", "one"))
+
+SUBAGENT_OBJECTS = sorted([
+    "CiliumNetworkPolicy/ag-sub-egress",
+    "CiliumNetworkPolicy/ag-sub-job-ingress",
+    "CiliumNetworkPolicy/ag-sub-toolset-ssh-egress",
+    "ConfigMap/ag-sub-toolset-secrets", "Role/ag-sub", "RoleBinding/ag-sub",
+    "Service/ag-sub-capability",
+    "ServiceAccount/ag-sub", "ServiceAccount/ag-sub-unprivileged"])
+
+def subagent_objects(docs):
+    if objects(docs) != SUBAGENT_OBJECTS:
+        return f"want {SUBAGENT_OBJECTS}, got {objects(docs)}"
+    secrets = get(docs, "ConfigMap", "ag-sub-toolset-secrets").get("data")
+    if secrets != {"sub-key": "ssh"}:
+        return f"want only the sub-agent's own Secret, got {secrets}"
+    cnps = [d for d in docs if d["kind"] == "CiliumNetworkPolicy"]
+    key = "sycophant.md/agent"
+    owners = [(d["metadata"].get("labels") or {}).get(key) for d in cnps]
+    if any(o != "sub" for o in owners):
+        return "every CNP must be keyed to the sub-agent"
+    eg = get(docs, "CiliumNetworkPolicy", "ag-sub-toolset-ssh-egress")
+    rules = eg["spec"]["egress"]
+    names = [f["matchName"] for r in rules for f in r.get("toFQDNs") or []]
+    fqdns = sorted(names)
+    return (None if fqdns == ["example.com"]
+            else f"want only the sub-agent's egress example.com, got {fqdns}")
+check(
+    "a sub-agent renders no Deployment, relay Service, PVC or reach Role, "
+    "and its Secrets and egress come from its own command",
+    "subagent", subagent_objects)
 
 # Every Role bound to relay-controller, in the tenant and channel charts: the
 # identity table (ConfigMaps) is read-only, and no
