@@ -3,6 +3,7 @@ pub(crate) mod command;
 pub(crate) mod common;
 pub(crate) mod connect;
 pub(crate) mod destroy;
+pub(crate) mod doctor;
 pub(crate) mod down;
 pub(crate) mod ingress;
 pub(crate) mod instructions;
