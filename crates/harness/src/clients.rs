@@ -1,6 +1,6 @@
 use proto_common::{
-    ContentBlock, SendServerNotificationRequest, SendServerRequestAndAwaitRequest, StreamItem,
-    SubscribeRequest, TurnStateEvent, UserMessage,
+    ContentBlock, SendServerNotificationRequest, SendServerRequestAndAwaitRequest,
+    SendServerRequestAndAwaitResponse, StreamItem, SubscribeRequest, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
 use relay_proto::{DeliverReplyRequest, DeliverStreamItemRequest, DeliverTurnStateRequest};
@@ -28,6 +28,25 @@ pub(crate) enum ServerRequestOutcome {
     TimedOut,
     UnknownChannelStream,
     UnsupportedMethod,
+}
+
+impl From<SendServerRequestAndAwaitResponse> for ServerRequestOutcome {
+    fn from(resp: SendServerRequestAndAwaitResponse) -> Self {
+        if resp.timed_out {
+            Self::TimedOut
+        } else if resp.unknown_channel_stream {
+            Self::UnknownChannelStream
+        } else if resp.unsupported_method {
+            Self::UnsupportedMethod
+        } else if let Some(err) = resp.error {
+            Self::Error {
+                code: err.code,
+                message: err.message,
+            }
+        } else {
+            Self::Result(resp.result_json)
+        }
+    }
 }
 
 /// The harness's model-call seam. `turn` is served by `InferenceDispatch`,
@@ -132,20 +151,7 @@ impl RelayRpc for RelayClient {
             .await
             .map_err(|e| format!("send_server_request_and_await RPC failed: {e}"))?
             .into_inner();
-        if resp.timed_out {
-            Ok(ServerRequestOutcome::TimedOut)
-        } else if resp.unknown_channel_stream {
-            Ok(ServerRequestOutcome::UnknownChannelStream)
-        } else if resp.unsupported_method {
-            Ok(ServerRequestOutcome::UnsupportedMethod)
-        } else if let Some(err) = resp.error {
-            Ok(ServerRequestOutcome::Error {
-                code: err.code,
-                message: err.message,
-            })
-        } else {
-            Ok(ServerRequestOutcome::Result(resp.result_json))
-        }
+        Ok(ServerRequestOutcome::from(resp))
     }
 
     async fn deliver_stream_item(&mut self, item: StreamItem) -> Result<bool, String> {

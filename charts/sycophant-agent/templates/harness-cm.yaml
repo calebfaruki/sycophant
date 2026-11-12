@@ -1,0 +1,18 @@
+{{/*
+A sub-agent's harness env and instructions-sync env, for its dispatch Jobs.
+A sub-agent has no Deployment, so this is where its env lives.
+*/}}
+{{- if .Values.command.parent }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ag-{{ .Values.name }}-harness
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.md/agent: {{ .Values.name }}
+data:
+  {{- include "sycophant.harnessEnv" . | nindent 2 }}
+  {{- include "sycophant.syncEnv" . | nindent 2 }}
+{{- end }}

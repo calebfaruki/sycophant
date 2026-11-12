@@ -10,7 +10,9 @@
 #
 #  1. A per-tenant ClusterRoleBinding binding the SHARED relay tokenreview
 #     ClusterRole to this tenant's relay ServiceAccount.
-#  2. A per-tenant ValidatingAdmissionPolicyBinding scoping the shared
+#  2. A per-tenant ClusterRoleBinding binding the SHARED dispatch tokenreview
+#     ClusterRole to this tenant's ServiceAccounts group.
+#  3. A per-tenant ValidatingAdmissionPolicyBinding scoping the shared
 #     cluster-gvisor-pod-policy VAP to this tenant ns.
 #
 # Generated resources are materialized asynchronously after admission returns —
@@ -21,11 +23,11 @@
 #
 # The reactor's background controller creates the namespace, and Kyverno skips
 # its own background requests unless `skipBackgroundRequests` is off, so it is
-# off here or a tenant from a provision command gets neither binding. The
+# off here or a tenant from a provision command gets none of its bindings. The
 # background controller labels no namespace but the reactor's; the suspend reactor's
-# reap-after stamp re-fires this policy onto the same two bindings.
+# reap-after stamp re-fires this policy onto the same bindings.
 #
-# Both generated bindings carry no `namespace`, which is how a template declares
+# The generated bindings carry no `namespace`, which is how a template declares
 # a cluster-scoped resource.
 #
 # The relay SA name inside the tenant ns is static (`relay-controller`) — no helm
@@ -90,6 +92,30 @@ spec:
             apiGroup: rbac.authorization.k8s.io
             kind: ClusterRole
             name: cluster-relay-tokenreview
+          ---
+          # Every ServiceAccount in the tenant may create TokenReviews, so a
+          # dispatch can check the harness that attaches to it.
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: (( variables.tenant ))-dispatch-tokenreview
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: (( variables.tenant ))
+                uid: (( variables.tenantUid ))
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: harness
+          subjects:
+            - kind: Group
+              apiGroup: rbac.authorization.k8s.io
+              name: system:serviceaccounts:(( variables.tenant ))
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-dispatch-tokenreview
           ---
           # ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
           # this ns. The VAP gates every Pod labeled `part-of=sycophant`

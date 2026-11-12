@@ -33,8 +33,7 @@
           "description": "Object-storage delivery of instruction content. The harness init container syncs each agent's folder <bucket>/system:serviceaccount:<namespace>:ag-<agent>/ from this endpoint, reading with the pod's own projected service-account token; the serving container mounts the result read-only and holds no token for the store.",
           "properties": {
             "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
-            "bucket": { "type": "string", "description": "Bucket holding every agent's instruction tree." },
-            "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
+            "bucket": { "type": "string", "description": "Bucket holding every agent's instruction tree." }
           }
         }
       }

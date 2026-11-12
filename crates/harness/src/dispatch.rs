@@ -196,10 +196,11 @@ impl DispatchState {
         namespace: String,
         service_name: String,
         agent: String,
+        workspace_agent: &str,
         scheduling: SchedulingConfig,
         toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
-        let workspace_pvc = format!("{AGENT_PREFIX}{agent}-workspace");
+        let workspace_pvc = format!("{AGENT_PREFIX}{workspace_agent}-workspace");
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
             result_txs: RwLock::new(HashMap::new()),
@@ -1144,6 +1145,7 @@ mod tests {
             "ns".to_string(),
             "capability-ag".to_string(),
             "ag".to_string(),
+            "ag",
             SchedulingConfig::default(),
             Arc::new(RwLock::new(ToolsetConfig::empty())),
         )

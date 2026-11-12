@@ -19,3 +19,18 @@ rules:
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
+---
+# A dispatch checks the token of each harness that attaches to it with
+# TokenReview. `tenant-bindings-kpol.yaml` binds each tenant's ServiceAccounts
+# group to this ClusterRole. It grants TokenReview alone.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-dispatch-tokenreview
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harness
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]

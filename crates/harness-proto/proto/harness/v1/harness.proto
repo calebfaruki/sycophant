@@ -59,3 +59,26 @@ service HarnessControl {
   // conversation log, and start the new window with the summary.
   rpc CompactContext (sycophant.common.v1.CompactContextRequest) returns (sycophant.common.v1.CompactContextResponse);
 }
+
+// --- Dispatch link ---
+//
+// A dispatch (a sub-agent pod) serves this on 9092. Its parent agent's harness
+// attaches to carry the dispatch's approval requests to people and to take its
+// final answer.
+service DispatchLink {
+  rpc Attach (stream ParentFrame) returns (stream DispatchFrame);
+}
+
+message DispatchFrame {
+  oneof frame {
+    sycophant.common.v1.SendServerRequestAndAwaitRequest request = 1;
+    string final_answer = 2;
+  }
+}
+
+message ParentFrame {
+  oneof frame {
+    sycophant.common.v1.SendServerRequestAndAwaitResponse response = 1;
+    bool answer_taken = 2;
+  }
+}

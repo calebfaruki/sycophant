@@ -32,9 +32,7 @@ spec:
               expirationSeconds: 600
   containers:
     - name: probe
-      # Moves with charts/sycophant-agent/values.yaml syncImage, the image
-      # e2e loads.
-      image: rclone/rclone:1.75.1
+      image: busybox:1.36
       imagePullPolicy: IfNotPresent
       command: ["sleep", "3600"]
       volumeMounts:

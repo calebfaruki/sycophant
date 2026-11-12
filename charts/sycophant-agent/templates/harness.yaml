@@ -14,14 +14,12 @@ The harness runs on the kubelet-default runtime. The Kyverno mutate
 stamps runtimeClassName=gvisor on capability-job pods only, so it is
 intentionally not set here.
 
-Audience strings on the projected tokens are duplicated from
-`crates/shared/src/auth.rs` (HARNESS_RELAY_AUDIENCE). Drift surfaces at
-first harness boot when audience verification fails.
+The token audiences below copy HARNESS_RELAY_AUDIENCE and
+HARNESS_DISPATCH_AUDIENCE from `crates/shared/src/auth.rs`.
 */}}
 {{- $name := .Values.name }}
 {{- $m := .Values.command }}
-{{- $secrets := dict }}
-{{- range $k, $v := $m }}{{ if hasPrefix "secret." $k }}{{ $_ := set $secrets $k $v }}{{ end }}{{ end }}
+{{- $sync := include "sycophant.syncEnv" $ | fromYaml }}
 {{- /*
 A sub-agent has no volumes, no Deployment and no relay Service of its own.
 */}}
@@ -122,7 +120,8 @@ spec:
       # anyway).
       initContainers:
         - name: instructions-sync
-          image: "{{ $.Values.harness.instructions.syncImage }}"
+          image: "{{ $.Values.harness.image }}:{{ $.Values.harness.tag }}"
+          imagePullPolicy: {{ $.Values.harness.pullPolicy | default "IfNotPresent" }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -135,32 +134,13 @@ spec:
             limits:
               cpu: "250m"
               memory: "128Mi"
-          command: ["/bin/sh", "-c"]
-          args:
-            - >
-              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/system:serviceaccount:{{ $.Release.Namespace }}:ag-{{ $name }}/" "/etc/instructions/{{ $name }}"
+          # rclone from the harness image, called directly. No shell.
+          command: ["/bin/rclone"]
+          args: ["sync", {{ $sync.INSTRUCTIONS_SOURCE | quote }}, {{ printf "/etc/instructions/%s" $name | quote }}]
           env:
-            # readOnlyRootFilesystem: rclone's cache (under HOME) and its config
-            # path both point at the writable scratch emptyDir below.
-            - { name: HOME,          value: /tmp }
-            - { name: RCLONE_CONFIG,  value: /tmp/rclone.conf }
-            # The `os` remote is defined by env alone, not by the config file:
-            # an S3 backend against the SeaweedFS S3 gateway, provider Other,
-            # taking its credential from the AWS env vars below.
-            - { name: RCLONE_CONFIG_OS_TYPE,     value: s3 }
-            - { name: RCLONE_CONFIG_OS_PROVIDER, value: Other }
-            - { name: RCLONE_CONFIG_OS_ENV_AUTH, value: "true" }
-            - { name: RCLONE_CONFIG_OS_ENDPOINT, value: "http://{{ $.Values.harness.instructions.endpoint }}" }
-            # The read grant is scoped to this folder, not the bucket, so skip
-            # rclone's bucket existence/create check: it would HeadBucket and 403.
-            - { name: RCLONE_CONFIG_OS_NO_CHECK_BUCKET, value: "true" }
-            # Web identity: the pod's projected token is exchanged through the
-            # store's STS for a short-lived read-only credential. No static keys
-            # are set; they would take precedence over web identity.
-            - { name: AWS_WEB_IDENTITY_TOKEN_FILE, value: /var/run/secrets/objectstore/token }
-            - { name: AWS_ROLE_ARN,                value: "arn:aws:iam::role/agent-instructions-read" }
-            - { name: AWS_ENDPOINT_URL_STS,        value: "http://{{ $.Values.harness.instructions.endpoint }}" }
-            - { name: AWS_REGION,                  value: us-east-1 }
+            {{- range $k, $v := $sync }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: instructions-{{ $name }},      mountPath: {{ printf "/etc/instructions/%s" $name | quote }} }
             - { name: instructions-sync-scratch,     mountPath: /tmp }
@@ -179,34 +159,10 @@ spec:
               cpu: "500m"
               memory: "256Mi"
           env:
-            - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-controller:9090" }
-            # This harness serves only its own agent's instructions, read
-            # in-process from the read-only volume mounted below at
-            # INSTRUCTIONS_ROOT/AGENT_NAME (must match the instructions mountPath).
-            - { name: AGENT_NAME, value: {{ $name | quote }} }
-            - { name: INSTRUCTIONS_ROOT,    value: "/etc/instructions" }
-            # The harness creates tool jobs via the kube API and dials each tool
-            # pod at its per-pod record under the headless Service below. It
-            # serves no pod-facing surface, so a popped tool pod can open no
-            # socket back. The toolset map is watched in this namespace.
-            - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
-            # The one model key this harness names; every turn uses it. Its
-            # config is its own watched `inf-<key>` ConfigMap. An empty or
-            # unknown key fails every turn closed.
-            - { name: MODEL, value: {{ $m.model | default "" | quote }} }
-            # How many archives a compact keeps (1 to 1000).
-            - { name: ARCHIVES, value: {{ $m.archives | default "10" | quote }} }
-            # The toolsets this harness lists and the Secrets each of them
-            # gets. Each toolset's tools are its own watched `ts-<name>`
-            # ConfigMap; a toolset outside this list is never listed, and this
-            # harness sees no sibling's Secrets.
-            - { name: TOOLSETS, value: {{ $m.toolsets | default "" | quote }} }
-            - { name: TOOLSET_SECRETS, value: {{ toJson $secrets | quote }} }
-            - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
-            # The per-agent headless Service that publishes each tool pod's
-            # per-pod record. Stamped as the pod subdomain and the middle DNS
-            # label the harness dials.
-            - { name: CAPABILITY_SERVICE_NAME,  value: "ag-{{ $name }}-capability" }
+            - { name: RELAY_GATEWAY_ADDR, value: "http://relay-controller:9090" }
+            {{- range $k, $v := include "sycophant.harnessEnv" $ | fromYaml }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
           ports:
             - { name: healthz, containerPort: 8080 }
             # Relay-facing forward surface (HarnessControl): relay-controller only.
@@ -223,6 +179,7 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: harness-relay-auth,     mountPath: /var/run/secrets/harness/relay,   readOnly: true }
+            - { name: harness-dispatch-auth,  mountPath: /var/run/secrets/harness/dispatch, readOnly: true }
             - { name: conversation-data,          mountPath: /var/lib/harness }
             # Read-only instructions volume. The harness reads AGENTS.md / agents /
             # skills from INSTRUCTIONS_ROOT/AGENT_NAME. It is an emptyDir the init
@@ -241,6 +198,14 @@ spec:
               - serviceAccountToken:
                   path: token
                   audience: harness.relay.sycophant.md
+                  expirationSeconds: 3600
+        # The token this harness presents when it attaches to its dispatches.
+        - name: harness-dispatch-auth
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: harness.dispatch.sycophant.md
                   expirationSeconds: 3600
         - name: conversation-data
           persistentVolumeClaim:

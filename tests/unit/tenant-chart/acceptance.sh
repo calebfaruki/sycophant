@@ -152,14 +152,15 @@ if [ -f "$WORK/channel-hardening/kyverno-test.yaml" ]; then
   results channel-hardening >/dev/null
 fi
 
-python3 - "$WORK" "$REMOTE" "$TOOLSET" "$AGENT" "$SUBJECT" "$HASH" <<'PY'
+python3 - "$WORK" "$REMOTE" "$TOOLSET" "$AGENT" "$SUBJECT" "$HASH" \
+  "$ROOT" <<'PY'
 import json, os, re, sys, yaml
 
 work, remote, toolset, agent = (
     sys.argv[1], json.loads(sys.argv[2]),
     json.loads(sys.argv[3]), json.loads(sys.argv[4])
 )
-subject, hash10 = sys.argv[5], sys.argv[6]
+subject, hash10, root = sys.argv[5], sys.argv[6], sys.argv[7]
 passed = failed = 0
 
 def ok(name):
@@ -636,32 +637,34 @@ check(
     "toolset with domains",
     "agent", command_toolset_objects)
 
-# The init container syncs the folder keyed by the agent service account's
-# token subject, and the source ends with "/" so rclone lists the folder rather
-# than HEADing a bare key the read grant denies.
+# The init container calls the harness image's /bin/rclone with no shell. It
+# syncs the folder keyed by the agent service account's token subject, and the
+# source ends with "/" so rclone lists the folder rather than HEADing a bare
+# key the read grant denies.
 def command_instructions_sync(docs):
-    d = get(docs, "Deployment", "ag-one")
-    if d is None:
-        return "Deployment/ag-one missing"
-    sync = " ".join(a for c in pod(d)["spec"].get("initContainers") or []
+    spec = pod(get(docs, "Deployment", "ag-one"))["spec"]
+    img = next(c["image"] for c in spec["containers"] if c["name"] == "harness")
+    sync = " ".join(a for c in spec.get("initContainers") or []
                     if c["name"] == "instructions-sync"
+                    and c.get("image") == img
                     for a in (c.get("command") or []) + (c.get("args") or []))
     want = (
-        r"os:sycophant-instructions/system:serviceaccount:"
+        r"^/bin/rclone sync os:sycophant-instructions/system:serviceaccount:"
         r"tenant-acme:ag-one/(?=[\"'\s]|$)")
     if not re.search(want, sync):
         return (
-            "sync source must be "
+            "want the harness image's /bin/rclone sync "
             "os:sycophant-instructions/system:serviceaccount:tenant-acme:"
             f"ag-one/ (trailing slash); got {sync!r}")
     vol = (next((
-        v for v in pod(d)["spec"].get("volumes") or []
+        v for v in spec.get("volumes") or []
         if v["name"] == "instructions-one"
     ), None))
     if vol is None or set(vol) != {"name", "emptyDir"}:
         return f"the instructions volume must be an emptyDir, got {vol}"
 check(
-    "an agent command syncs instructions from "
+    "an agent command syncs instructions with the harness image's "
+    "/bin/rclone, no shell, from "
     "<bucket>/system:serviceaccount:<ns>:ag-<agent>/ into an emptyDir",
     "agent", command_instructions_sync)
 
@@ -1047,6 +1050,7 @@ SUBAGENT_OBJECTS = sorted([
     "CiliumNetworkPolicy/ag-sub-egress",
     "CiliumNetworkPolicy/ag-sub-job-ingress",
     "CiliumNetworkPolicy/ag-sub-toolset-ssh-egress",
+    "ConfigMap/ag-sub-harness",
     "ConfigMap/ag-sub-toolset-secrets", "Role/ag-sub", "RoleBinding/ag-sub",
     "Service/ag-sub-capability",
     "ServiceAccount/ag-sub", "ServiceAccount/ag-sub-unprivileged"])
@@ -1072,6 +1076,45 @@ check(
     "a sub-agent renders no Deployment, relay Service, PVC or reach Role, "
     "and its Secrets and egress come from its own command",
     "subagent", subagent_objects)
+
+def subagent_instructions_source(docs):
+    cm = get(docs, "ConfigMap", "ag-sub-harness")
+    if cm is None:
+        return "no ConfigMap/ag-sub-harness in the render"
+    src = (cm.get("data") or {}).get("INSTRUCTIONS_SOURCE")
+    want = ("os:sycophant-instructions/system:serviceaccount:"
+            "tenant-acme:ag-sub/")
+    return (None if src == want
+            else f"INSTRUCTIONS_SOURCE must be {want!r}, got {src!r}")
+check(
+    "a sub-agent's harness ConfigMap names the sub-agent's own instructions "
+    "folder",
+    "subagent", subagent_instructions_source)
+
+def subagent_ingress(docs):
+    rules = [
+        r for p in cnps(docs)
+        if ((p["spec"].get("endpointSelector") or {}).get("matchLabels")
+            or {}).get("app.kubernetes.io/component") == "harness"
+        for r in p["spec"].get("ingress") or []
+    ]
+    got = [(sorted(r), [e.get("matchLabels")
+                        for e in r.get("fromEndpoints") or []],
+            r.get("toPorts")) for r in rules]
+    want = [(
+        ["fromEndpoints", "toPorts"],
+        [{
+            "app.kubernetes.io/component": "harness",
+            "app.kubernetes.io/part-of": "sycophant",
+            "sycophant.md/agent": "one",
+        }],
+        [{"ports": [{"port": "9092", "protocol": "TCP"}]}],
+    )]
+    return None if got == want else f"want {want}, got {got}"
+check(
+    "a sub-agent's harness pods admit only the harness pods of its parent "
+    "agent, on 9092 only",
+    "subagent", subagent_ingress)
 
 # Every Role bound to relay-controller, in the tenant and channel charts: the
 # identity table (ConfigMaps) is read-only, and no
@@ -1502,6 +1545,19 @@ def channel_identity_secret(_):
     return wrong and f"want tailnet-identity, got {wrong}"
 check("the channel identity Secret is tailnet-identity in all five places",
       None, channel_identity_secret)
+
+# The dispatch checks the parent's token against HARNESS_DISPATCH_AUDIENCE, so
+# the token the agent's harness mounts must be minted for that audience.
+def dispatch_token_audience(docs):
+    src = open(os.path.join(root, "crates/shared/src/auth.rs")).read()
+    want = re.search(r'HARNESS_DISPATCH_AUDIENCE: &str = "([^"]*)"', src)[1]
+    spec = pod(get(docs, "Deployment", "ag-one"))["spec"]
+    vol = [v for v in spec["volumes"] if v["name"] == "harness-dispatch-auth"]
+    srcs = [s for v in vol for s in v["projected"]["sources"]]
+    got = [s["serviceAccountToken"]["audience"] for s in srcs]
+    return got != [want] and f"want [{want}], got {got}"
+check("an agent's harness-dispatch-auth token has the code's dispatch audience",
+      "agbase", dispatch_token_audience)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

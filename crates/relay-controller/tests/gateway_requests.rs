@@ -315,7 +315,7 @@ struct FixedVerifier(&'static str);
 #[async_trait::async_trait]
 impl shared::auth::TokenVerifier for FixedVerifier {
     async fn verify_token(&self, _token: &str) -> Result<String, tonic::Status> {
-        Ok(self.0.to_string())
+        Ok(format!("system:serviceaccount:ns:ag-{}", self.0))
     }
 }
 

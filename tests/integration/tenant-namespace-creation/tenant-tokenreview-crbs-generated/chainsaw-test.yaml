@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: tenant-tokenreview-crbs-generated
 spec:
-  description: A tenant-labeled namespace gets the relay tokenreview ClusterRoleBinding and the gVisor VAP binding.
+  description: A tenant-labeled namespace gets the relay tokenreview ClusterRoleBinding, the dispatch tokenreview ClusterRoleBinding for its ServiceAccounts group, and the gVisor VAP binding. The dispatch ClusterRole grants only tokenreviews create.
   bindings:
     - name: tenant_ns
       value: (join('-', ['labeled', random('[a-z0-9]{8}')]))
@@ -45,6 +45,22 @@ spec:
                 - apiGroups: ["authorization.k8s.io"]
                   resources: ["subjectaccessreviews"]
                   verbs: ["create"]
+                  (length(verbs) == `1`): true
+    - name: assert-dispatch-tokenreview-clusterrole-rules
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: cluster-dispatch-tokenreview
+              (length(rules) == `1`): true
+              rules:
+                - apiGroups: ["authentication.k8s.io"]
+                  resources: ["tokenreviews"]
+                  verbs: ["create"]
+                  (length(apiGroups) == `1`): true
+                  (length(resources) == `1`): true
                   (length(verbs) == `1`): true
     - name: create-labeled-ns
       try:
@@ -110,6 +126,27 @@ spec:
             apiVersion: rbac.authorization.k8s.io/v1
             kind: ClusterRoleBinding
             name: (join('-', [$tenant_ns, 'relay-tokenreview']))
+    - name: assert-dispatch-tokenreview-crb
+      try:
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('-', [$tenant_ns, 'dispatch-tokenreview']))
+              (length(subjects) == `1`): true
+              subjects:
+                - kind: Group
+                  name: (join(':', ['system', 'serviceaccounts', $tenant_ns]))
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: cluster-dispatch-tokenreview
+      catch:
+        - describe:
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            name: (join('-', [$tenant_ns, 'dispatch-tokenreview']))
     - name: assert-pod-vap-binding
       try:
         - assert:
@@ -144,6 +181,7 @@ spec:
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
               kubectl delete clusterrolebinding \
                 "${TENANT_NS}-relay-tokenreview" \
+                "${TENANT_NS}-dispatch-tokenreview" \
                 --ignore-not-found
               kubectl delete validatingadmissionpolicybinding \
                 "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found
@@ -157,6 +195,7 @@ spec:
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
           kubectl delete clusterrolebinding \
             "${TENANT_NS}-relay-tokenreview" \
+            "${TENANT_NS}-dispatch-tokenreview" \
             --ignore-not-found
           kubectl delete validatingadmissionpolicybinding \
             "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found

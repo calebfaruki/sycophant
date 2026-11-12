@@ -14,7 +14,7 @@ use proto_common::{
 };
 use relay_proto::relay_internal_server::RelayInternal;
 use relay_proto::{DeliverStreamItemRequest, DeliverStreamItemResponse};
-use shared::auth::{extract_bearer_token, TokenVerifier};
+use shared::auth::{agent_from_username, extract_bearer_token, TokenVerifier};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -49,7 +49,7 @@ impl InternalService {
             )
         })?;
         let token = extract_bearer_token(request)?;
-        verifier.verify_token(token).await
+        agent_from_username(&verifier.verify_token(token).await?)
     }
 }
 
@@ -256,7 +256,7 @@ mod tests {
     #[async_trait]
     impl TokenVerifier for FixedVerifier {
         async fn verify_token(&self, _token: &str) -> Result<String, Status> {
-            Ok(self.0.clone())
+            Ok(format!("system:serviceaccount:ns:ag-{}", self.0))
         }
     }
 

@@ -5,6 +5,7 @@ mod clients;
 mod config;
 mod conversation;
 mod dispatch;
+mod dispatch_link;
 mod execution_log;
 mod grpc_server;
 mod healthz;
@@ -27,8 +28,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use agent_state::AgentState;
-use config::HarnessConfig;
+use config::{HarnessConfig, Mode};
 use dispatch::DispatchState;
+use dispatch_link::{dispatch_verifier, MandateSource, ParentLink};
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::ToolsetConfig;
 use tokio::sync::RwLock;
@@ -42,6 +44,9 @@ const HEALTHZ_PORT: u16 = 8080;
 /// The relay-facing HarnessControl port. NetworkPolicy admits relay-ctrl alone
 /// to it.
 const RELAY_FORWARD_PORT: u16 = 9091;
+/// The port a dispatch serves `DispatchLink` on. NetworkPolicy admits the
+/// parent agent's harness alone to it.
+const DISPATCH_LINK_PORT: u16 = 9092;
 
 /// The port every capability-job pod serves its `ToolJob` gRPC server on. The
 /// harness dials it, the per-agent headless Service publishes it, and the
@@ -74,11 +79,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     conversation::write_logrotate_conf(&conversation_dir, config.archives)?;
     let agent_state = Arc::new(AgentState::load(conversation_dir.clone(), config.archives).await?);
     tracing::info!(dir = %conversation_dir.display(), "conversation store ready");
-
-    let relay = clients::RelayClient::connect(&config.relay_gateway_addr).await?;
-    let relay_subscribe = relay.clone();
-    let mut relay_deliver = relay.clone();
-    tracing::info!(addr = %config.relay_gateway_addr, "connected to relay gateway");
 
     // In-process instructions reader over the mounted read-only instructions volume. Each
     // harness serves only its own agent's instructions (AGENTS.md, agents,
@@ -117,11 +117,42 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let kube_for_toolset = kube_client.clone();
     let kube_for_models = kube_client.clone();
     let scheduling_for_inference = scheduling.clone();
+
+    // An agent talks to the relay. A dispatch talks to its parent agent's
+    // harness, and its tool Jobs mount the parent's workspace.
+    let (relay, link, workspace_agent, seam) = match &config.mode {
+        Mode::Agent { relay_gateway_addr } => {
+            let relay = clients::RelayClient::connect(relay_gateway_addr).await?;
+            tracing::info!(addr = %relay_gateway_addr, "connected to relay gateway");
+            let seam = tool_router::relay_seam(relay.clone());
+            (Some(relay), None, config.agent.clone(), seam)
+        }
+        Mode::Dispatch { parent, .. } => {
+            let client = kube_client
+                .clone()
+                .ok_or("a dispatch needs a kube client to check the parent's token")?;
+            let link = ParentLink::new(
+                parent.clone(),
+                config.namespace.clone(),
+                Arc::new(dispatch_verifier(client)),
+            );
+            let seam = tool_router::relay_seam(link.clone());
+            (None, Some(link), parent.clone(), seam)
+        }
+    };
+    let router = tool_router::ToolRouter::new(
+        instructions.clone(),
+        config.agent.clone(),
+        Some(seam),
+        agent_state.clone(),
+    );
+
     let dispatch = DispatchState::new(
         kube_client,
         config.namespace.clone(),
         config.capability_service.clone(),
         config.agent.clone(),
+        &workspace_agent,
         scheduling,
         toolset_config.clone(),
     );
@@ -132,14 +163,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
-        tool_router::ToolRouter::new(
-            instructions.clone(),
-            config.agent.clone(),
-            Some(relay),
-            agent_state.clone(),
-        )
-        .with_dispatch(dispatch.clone())
-        .with_toolset_scope(config.toolsets.clone(), config.toolset_secrets.clone()),
+        router
+            .with_dispatch(dispatch.clone())
+            .with_toolset_scope(config.toolsets.clone(), config.toolset_secrets.clone()),
     );
 
     // The live dispatch table, which also rebuilds the router's toolset tools on
@@ -227,6 +253,44 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
     let mut inference = inference_factory();
+    let idle_gap = std::time::Duration::from_secs(config.idle_gap_secs);
+
+    if let (Mode::Dispatch { path, mandate, .. }, Some(link)) = (&config.mode, link) {
+        let addr: SocketAddr = ([0, 0, 0, 0], DISPATCH_LINK_PORT).into();
+        let server = Server::builder()
+            .add_service(harness_proto::dispatch_link_server::DispatchLinkServer::new(link.clone()))
+            .serve(addr);
+        tokio::spawn(async move {
+            if let Err(e) = server.await {
+                tracing::error!(error = %e, "dispatch link gRPC server exited");
+            }
+        });
+        tracing::info!(dispatch_link = %addr, path = %path, "dispatch link listening");
+
+        let mut source = MandateSource::new(path.clone(), mandate.clone());
+        let mut relay_deliver = link.clone();
+        let turns = runtime_entrypoint::message_loop(
+            config.max_iterations,
+            idle_gap,
+            config.model.clone(),
+            inference.as_mut(),
+            &mut relay_deliver,
+            &instructions,
+            &config.agent,
+            tool_router,
+            agent_state,
+            &mut source,
+        );
+        // The dispatch ends once the parent has taken its final answer.
+        tokio::select! {
+            res = turns => res?,
+            () = link.answer_taken() => tracing::info!("final answer taken"),
+        }
+        return Ok(());
+    }
+    let relay = relay.ok_or("no relay client")?;
+    let relay_subscribe = relay.clone();
+    let mut relay_deliver = relay;
 
     let subscribed_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));
@@ -236,7 +300,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // pod directly, so a popped tool pod can open no socket back to the harness.
     let grpc_router_handle = tool_router.clone();
     let grpc_agent_state_handle = agent_state.clone();
-    let idle_gap = std::time::Duration::from_secs(config.idle_gap_secs);
     let relay_forward_addr: SocketAddr = ([0, 0, 0, 0], RELAY_FORWARD_PORT).into();
 
     tokio::spawn(async move {

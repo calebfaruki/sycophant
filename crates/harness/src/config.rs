@@ -5,8 +5,24 @@ use shared::toolset::ToolsetSecret;
 
 use crate::conversation::MAX_ARCHIVES;
 
+/// What this harness serves: an agent, which talks to the relay, or a
+/// dispatch of a sub-agent, which talks to its parent agent's harness.
+pub(crate) enum Mode {
+    Agent {
+        relay_gateway_addr: String,
+    },
+    Dispatch {
+        /// `<sub-agent>/<id>`, from `DISPATCH_PATH`.
+        path: String,
+        /// The task the parent gave, from `MANDATE`.
+        mandate: String,
+        /// The agent this sub-agent belongs to, from `PARENT`.
+        parent: String,
+    },
+}
+
 pub(crate) struct HarnessConfig {
-    pub relay_gateway_addr: String,
+    pub mode: Mode,
     /// Root under which this agent's instructions directory lives:
     /// `<instructions_root>/<agent>` holds AGENTS.md, agents/ and skills/.
     pub instructions_root: PathBuf,
@@ -39,8 +55,17 @@ pub(crate) struct HarnessConfig {
 
 impl HarnessConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
-        let relay_gateway_addr =
-            std::env::var("RELAY_GATEWAY_ADDR").map_err(|_| "RELAY_GATEWAY_ADDR is required")?;
+        let mode = match std::env::var("DISPATCH_PATH") {
+            Ok(path) => Mode::Dispatch {
+                path,
+                mandate: std::env::var("MANDATE").map_err(|_| "MANDATE is required")?,
+                parent: std::env::var("PARENT").map_err(|_| "PARENT is required")?,
+            },
+            Err(_) => Mode::Agent {
+                relay_gateway_addr: std::env::var("RELAY_GATEWAY_ADDR")
+                    .map_err(|_| "RELAY_GATEWAY_ADDR is required")?,
+            },
+        };
 
         let instructions_root = std::env::var("INSTRUCTIONS_ROOT")
             .map(PathBuf::from)
@@ -87,7 +112,7 @@ impl HarnessConfig {
         let archives = parse_archives(std::env::var("ARCHIVES").ok().as_deref())?;
 
         Ok(Self {
-            relay_gateway_addr,
+            mode,
             instructions_root,
             agent,
             max_iterations,

@@ -908,6 +908,7 @@ dependencies = [
 name = "harness-proto"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "proto-common",
  "tonic",
  "tonic-build",

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+prost.workspace = true
 proto-common.workspace = true
 tonic.workspace = true
 

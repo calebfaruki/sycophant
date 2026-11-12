@@ -195,21 +195,7 @@ step_0_bootstrap() {
   sycoadm_setup
 }
 
-# ---- step 1: model, llama-server and rclone images ----
-# Import a single-arch image from a multi-arch index into k3d.
-# $1 = upstream ref, $2 = optional local tag.
-import_multiarch_image() {
-  local ref="$1" local_tag="${2:-}"
-  docker pull -q --platform "linux/${DOCKER_ARCH}" "$ref" >/dev/null
-  [ -z "$local_tag" ] || docker tag "$ref" "$local_tag"
-  local save_ref="${local_tag:-$ref}"
-  local tar
-  tar="$(mktemp -t image.XXXXXX).tar"
-  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" "$save_ref"
-  k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
-  rm -f "$tar"
-}
-
+# ---- step 1: model and llama-server images ----
 prepare_inference_assets() {
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
@@ -241,23 +227,26 @@ print(profile["inference"]["server"]["memory"])' \
 }
 
 load_images_to_k3d() {
-  local sync_image
-  sync_image="$(python3 -c 'import sys, yaml
-values = yaml.safe_load(open(sys.argv[1]))
-print(values["harness"]["instructions"]["syncImage"])' \
-    "$REPO_ROOT/charts/sycophant-agent/values.yaml")"
+  local tar
   k3d image import weights:local --cluster "$CLUSTER_NAME" >/dev/null
-  import_multiarch_image "$LLAMA_SERVER_REF" llama-server:local
-  import_multiarch_image "$sync_image"
+  # Save one arch of the llama-server index so k3d can import it.
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$LLAMA_SERVER_REF" \
+    >/dev/null
+  docker tag "$LLAMA_SERVER_REF" llama-server:local
+  tar="$(mktemp -t image.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" \
+    llama-server:local
+  k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$tar"
 }
 
-# `sycoadm setup` builds and loads the sycophant images; this loads the model,
-# llama-server and rclone images too.
+# `sycoadm setup` builds and loads the sycophant images; this loads the model
+# and llama-server images too.
 step_1_build() {
-  step "Step 1: model, llama-server and rclone images"
+  step "Step 1: model and llama-server images"
   prepare_inference_assets
   load_images_to_k3d
-  ok "model, llama-server and rclone images loaded"
+  ok "model and llama-server images loaded"
 }
 
 # ---- step 3: deploy ----

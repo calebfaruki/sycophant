@@ -9,6 +9,7 @@ use tonic::{Request, Status};
 
 #[async_trait]
 pub trait TokenVerifier: Send + Sync {
+    /// Check `token` and return the caller's raw TokenReview username.
     async fn verify_token(&self, token: &str) -> Result<String, Status>;
 }
 
@@ -23,6 +24,11 @@ impl K8sTokenVerifier {
             client,
             audience: audience.into(),
         }
+    }
+
+    /// The audience every review this verifier submits is pinned to.
+    pub fn audience(&self) -> &str {
+        &self.audience
     }
 }
 
@@ -46,8 +52,7 @@ fn build_token_review(token: &str, audience: Option<&str>) -> TokenReview {
 #[async_trait]
 impl TokenVerifier for K8sTokenVerifier {
     async fn verify_token(&self, token: &str) -> Result<String, Status> {
-        let username = review_token_username(&self.client, token, Some(&self.audience)).await?;
-        agent_from_username(&username)
+        review_token_username(&self.client, token, Some(&self.audience)).await
     }
 }
 
@@ -56,7 +61,7 @@ impl TokenVerifier for K8sTokenVerifier {
 /// Pure function — separated from the API call so the SA-name mapping is
 /// unit-testable without a kube client.
 #[allow(clippy::result_large_err)]
-fn agent_from_username(username: &str) -> Result<String, Status> {
+pub fn agent_from_username(username: &str) -> Result<String, Status> {
     let sa_name = serviceaccount_from_username(username)
         .map(|(_, sa)| sa)
         .ok_or_else(|| Status::permission_denied("caller is not a ServiceAccount"))?;
@@ -140,6 +145,10 @@ pub const RELAY_HARNESS_AUDIENCE: &str = "relay.harness.sycophant.md";
 /// Relay pins this audience on TokenReview for harness-bound
 /// internal methods.
 pub const HARNESS_RELAY_AUDIENCE: &str = "harness.relay.sycophant.md";
+
+/// Audience for the token a parent agent's harness presents when it attaches
+/// to a dispatch's `DispatchLink`.
+pub const HARNESS_DISPATCH_AUDIENCE: &str = "harness.dispatch.sycophant.md";
 
 /// Tonic interceptor that injects an SA token as a `Bearer <token>`
 /// Authorization header on every outgoing request. The token is
@@ -465,6 +474,7 @@ mod tests {
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
             CHANNEL_RELAY_AUDIENCE,
+            HARNESS_DISPATCH_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

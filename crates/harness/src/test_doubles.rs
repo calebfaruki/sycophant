@@ -390,6 +390,7 @@ pub(crate) fn in_process_dispatch(names: &[&str]) -> Arc<DispatchState> {
         "ns".to_string(),
         "capability-ag".to_string(),
         TEST_AG.to_string(),
+        TEST_AG,
         SchedulingConfig::default(),
         Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
     )

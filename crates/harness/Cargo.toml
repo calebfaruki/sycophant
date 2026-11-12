@@ -30,7 +30,7 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 arc-swap = { workspace = true }
 thiserror = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util.workspace = true

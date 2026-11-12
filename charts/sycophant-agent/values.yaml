@@ -43,5 +43,3 @@ harness:
     # side carries only the harness egress permission.
     endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
     bucket: sycophant-instructions
-    # The init container's `rclone sync` mirrors the prefix into the emptyDir.
-    syncImage: rclone/rclone:1.75.1

@@ -11,11 +11,9 @@
 # has no "peer label equals my label" primitive, so the per-agent scope
 # must be rendered, not expressed in a single namespace-wide policy.
 #
-# The harness serves one inbound surface: the relay-forward surface
-# (HarnessControl) on 9091, admitting relay-controller alone. It serves no
-# pod-facing surface — it dials each tool pod on 9090 instead, and the
-# reverse direction is denied. The sibling per-agent CNP below admits
-# only this agent's harness to the tool pods' gRPC port.
+# The harness dials each tool pod on 9090, and the reverse direction is
+# denied. The sibling per-agent CNP below admits only this agent's
+# harness to the tool pods' gRPC port.
 #
 # Why a single CNP and not a K8s NetworkPolicy alongside: Cilium's
 # documented "L4 shadows L7" merge semantics
@@ -139,6 +137,19 @@ spec:
               protocol: TCP
     {{- end }}
   ingress:
+    {{- with .Values.command.parent }}
+    # A dispatch serves DispatchLink on 9092 to its parent agent's harness
+    # alone. The dispatch also checks the caller's token.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: harness
+            app.kubernetes.io/part-of: sycophant
+            sycophant.md/agent: {{ . }}
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+    {{- else }}
     # Relay forwards registered-user requests to this harness's relay-forward
     # surface (HarnessControl) on 9091. relay-controller serves every agent and
     # routes by verified agent, so this rule is not agent-scoped.
@@ -150,6 +161,7 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
+    {{- end }}
 ---
 # Per-agent tool-pod ingress: admit ONLY this agent's harness to the
 # capability-job pods' gRPC server port. The harness dials the pod; the pod

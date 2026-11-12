@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent_state::AgentState;
 use crate::channel_stream_tools;
-use crate::clients::{RelayClient, RelayRpc};
+use crate::clients::RelayRpc;
 use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
 use crate::instructions::Instructions;
@@ -34,7 +34,7 @@ use crate::runtime_tools::{self, DispatchAbort};
 use crate::tool_approval::{self, Approval};
 
 /// Mints a fresh relay handle per call.
-type RelaySeam = Arc<dyn Fn() -> Box<dyn RelayRpc> + Send + Sync>;
+pub(crate) type RelaySeam = Arc<dyn Fn() -> Box<dyn RelayRpc> + Send + Sync>;
 
 /// Which subsystem owns a given tool name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,7 +202,7 @@ fn failed_terminal() -> ToolResultFrame {
     }
 }
 
-fn relay_seam<R: RelayRpc + Clone + Sync + 'static>(relay: R) -> RelaySeam {
+pub(crate) fn relay_seam<R: RelayRpc + Clone + Sync + 'static>(relay: R) -> RelaySeam {
     Arc::new(move || Box::new(relay.clone()) as Box<dyn RelayRpc>)
 }
 
@@ -210,7 +210,7 @@ impl ToolRouter {
     pub(crate) fn new(
         instructions: Arc<Instructions>,
         agent: String,
-        relay: Option<RelayClient>,
+        relay: Option<RelaySeam>,
         agent_state: Arc<AgentState>,
     ) -> Self {
         let mut tools: Vec<CatalogEntry> = runtime_tools::tool_definitions()
@@ -245,7 +245,7 @@ impl ToolRouter {
         Self {
             instructions,
             agent,
-            relay: relay.map(relay_seam),
+            relay,
             agent_state,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
@@ -256,8 +256,8 @@ impl ToolRouter {
         }
     }
 
-    /// Install `relay` as the relay every call reaches, in place of the
-    /// `RelayClient` given to `new`.
+    /// Install `relay` as the relay every call reaches, in place of the one
+    /// given to `new`.
     #[cfg(test)]
     fn with_relay<R: RelayRpc + Clone + Sync + 'static>(mut self, relay: R) -> Self {
         self.relay = Some(relay_seam(relay));
