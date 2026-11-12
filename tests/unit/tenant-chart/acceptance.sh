@@ -468,6 +468,9 @@ def harness_reaches_inference(docs):
     want = [
         {"matchPattern": "inf-*.tenant-acme.svc.cluster.local"},
         {"matchPattern": "*.ag-one-capability.tenant-acme.svc.cluster.local"},
+        {"matchPattern": "*.ag-one-dispatch.tenant-acme.svc.cluster.local"},
+        {"matchName":
+          "_dispatch._tcp.ag-one-dispatch.tenant-acme.svc.cluster.local"},
         {"matchName": "relay-controller.tenant-acme.svc.cluster.local"},
         {"matchName": "seaweedfs.sycophant-system.svc.cluster.local"},
     ]
@@ -483,12 +486,17 @@ def harness_reaches_inference(docs):
         "app.kubernetes.io/part-of": "sycophant",
         "k8s:io.kubernetes.pod.namespace": "sycophant-system"
     }, 8333)
-    return (None if warm and relay and store
+    subs = reaches({"app.kubernetes.io/component": "harness",
+                    "app.kubernetes.io/part-of": "sycophant",
+                    "sycophant.md/parent": "one"}, 9092)
+    return (None if warm and relay and store and subs
             and sorted(dns, key=str) == sorted(want, key=str)
-            else f"warm={warm} relay={relay} store={store} dns={dns}")
+            else f"warm={warm} relay={relay} store={store} subs={subs} "
+            f"dns={dns}")
 check(
-    "harness egress reaches the inference pods, the relay on 9090 and the "
-    "store on 8333, and resolves only their names",
+    "harness egress reaches the inference pods, the relay on 9090, the "
+    "store on 8333 and its sub-agents' harnesses on 9092, and resolves only "
+    "their names plus its tool pods' names",
     "agbase", harness_reaches_inference)
 
 def harness_dials_tool_pods(docs):
@@ -686,8 +694,21 @@ AGENT_OBJECTS = sorted([
     "PersistentVolumeClaim/ag-one-workspace",
     "Role/ag-one", "Role/ag-one-reach",
     "RoleBinding/ag-one",
-    "Service/ag-one", "Service/ag-one-capability",
+    "Service/ag-one", "Service/ag-one-capability", "Service/ag-one-dispatch",
     "ServiceAccount/ag-one", "ServiceAccount/ag-one-unprivileged"])
+
+def sub_agent_service(docs):
+    s = (get(docs, "Service", "ag-one-dispatch") or {}).get("spec") or {}
+    got = (
+        s.get("clusterIP"), s.get("selector", {}).get("sycophant.md/parent"),
+        [(p.get("name"), p.get("port")) for p in s.get("ports") or []],
+        s.get("publishNotReadyAddresses", False))
+    want = ("None", "one", [("dispatch", 9092)], False)
+    return None if got == want else f"want {want}, got {got}"
+check(
+    "an agent's ag-one-dispatch Service is headless, selects pods whose parent "
+    "is the agent, names its only port 9092 dispatch and lists only ready pods",
+    "agent", sub_agent_service)
 
 def agent_references(docs):
     if objects(docs) != AGENT_OBJECTS:
@@ -1115,6 +1136,25 @@ check(
     "a sub-agent's harness pods admit only the harness pods of its parent "
     "agent, on 9092 only",
     "subagent", subagent_ingress)
+
+def subagent_no_relay(docs):
+    p = get(docs, "CiliumNetworkPolicy", "ag-sub-egress")
+    if p is None:
+        return "ag-sub-egress missing"
+    eg = p["spec"].get("egress") or []
+    peers = [
+        e.get("matchLabels") for r in eg for e in r.get("toEndpoints") or []
+        if (e.get("matchLabels") or {}).get("app.kubernetes.io/name")
+        == "relay-controller"]
+    names = [
+        n for r in eg for t in r.get("toPorts") or []
+        for n in (t.get("rules") or {}).get("dns") or []
+        if "relay-controller" in str(n)]
+    return (None if not peers and not names
+            else f"relay peers {peers}, relay DNS names {names}")
+check(
+    "a sub-agent's harness egress reaches no relay and resolves no relay name",
+    "subagent", subagent_no_relay)
 
 # Every Role bound to relay-controller, in the tenant and channel charts: the
 # identity table (ConfigMaps) is read-only, and no

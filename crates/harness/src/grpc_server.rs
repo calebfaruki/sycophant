@@ -564,7 +564,7 @@ mod dispatch_await_cancel_tests {
     /// `<root>/execution.json`.
     async fn service_and_root() -> (HarnessService, std::path::PathBuf, Arc<DispatchState>) {
         let root = tempfile::TempDir::new().unwrap().keep();
-        let agent_state = Arc::new(AgentState::load(root.clone(), 10).await.unwrap());
+        let agent_state = Arc::new(AgentState::open(root.clone(), 10).await.unwrap());
         let dispatch = in_process_dispatch(&["ts"]);
         seed_job(&dispatch, "Bash", "job-x").await;
         let router: Arc<ToolRouter> = Arc::new(seed(
@@ -651,7 +651,7 @@ mod context_tests {
         let root = tempfile::TempDir::new().unwrap();
         fs::write(root.path().join("conversation.log"), log).unwrap();
         let agent_state = Arc::new(
-            AgentState::load(root.path().to_path_buf(), 10)
+            AgentState::open(root.path().to_path_buf(), 10)
                 .await
                 .unwrap(),
         );

@@ -36,7 +36,7 @@ cat >"$WORK/bin/kubectl" <<'SH'
 printf 'kubectl %s\n' "$*" >> "$CALLS"
 case "$*" in
   # editorconfig-checker-disable-next-line
-  *"get configmap"*"-o json"*) [ -n "$GET_CM_EXIT" ] && exit "$GET_CM_EXIT"; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z","annotations":{"sycophant.md/target":"%s"}},"data":%s}' "$ORIG_UID" "$STUB_TARGET" "$GET_CM" ;;
+  *"get configmap"*"-o json"*) [ -n "$GET_CM_EXIT" ] && exit "$GET_CM_EXIT"; [ -n "$GET_CM_GONE" ] && { case "$*" in *--ignore-not-found*) exit 0 ;; esac; exit 1; }; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z","annotations":{"sycophant.md/target":"%s"}},"data":%s}' "$ORIG_UID" "$STUB_TARGET" "$GET_CM" ;;
   *"get deployment"*)
     [ -n "$GET_DEPLOY_EXIT" ] && exit "$GET_DEPLOY_EXIT"
     printf 'deployment.apps/ag-one\n' ;;
@@ -216,7 +216,7 @@ def job_env(job):
     return {e["name"]: e.get("value", "") for e in c.get("env", [])}
 
 def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False,
-            get_deploy_exit="", target=None):
+            get_deploy_exit="", target=None, gone=""):
     c = job["spec"]["template"]["spec"]["containers"][0]
     script = c["args"][0].replace("/tmp/", work + "/scratch/")
     os.makedirs(work + "/scratch", exist_ok=True)
@@ -230,7 +230,8 @@ def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False,
     env.update(
         PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls,
         HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm,
-        GET_CM_EXIT=get_cm_exit, GET_DEPLOY_EXIT=get_deploy_exit,
+        GET_CM_EXIT=get_cm_exit, GET_CM_GONE=gone,
+        GET_DEPLOY_EXIT=get_deploy_exit,
         STUB_TARGET=target
     )
     # The stub always returns the command's real uid in its JSON.
@@ -243,6 +244,11 @@ def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False,
                         capture_output=True).returncode
     with open(calls) as fh:
         return rc, [l.split() for l in fh.read().splitlines()]
+
+def refused(job):
+    # The exit code on which the Job's podFailurePolicy fails it at once.
+    r = job["spec"]["podFailurePolicy"]["rules"][0]
+    return r["onExitCodes"]["values"][0] if r["action"] == "FailJob" else None
 
 def selects(selector, labels):
     if (any(labels.get(k) != v
@@ -338,23 +344,28 @@ for kind in ("tenant", "agent"):
     if kind != "tenant":
         # A retry that finds its command gone must not reach helm: empty
         # values would prune the release.
+        rc, calls = run_job(job, 0, gone="1")
+        check(f"{kind}: a missing command is refused before helm",
+              None if rc == refused(job) and not helms(calls)
+              else f"rc={rc}, calls={show(calls)}")
         rc, calls = run_job(job, 0, get_cm_exit="1")
-        check(f"{kind}: a missing command stops the install before helm",
-              None if rc != 0 and not helms(calls)
+        check(f"{kind}: a failed command read stops the install before helm "
+              "and is retried",
+              None if rc not in (0, refused(job)) and not helms(calls)
               else f"rc={rc}, calls={show(calls)}")
 
         rc, calls = run_job(job, 0, wrong_uid=True)
-        check(f"{kind}: a replaced command stops the install before helm",
-              None if rc != 0 and not helms(calls)
+        check(f"{kind}: a replaced command is refused before helm",
+              None if rc == refused(job) and not helms(calls)
               else f"rc={rc}, calls={show(calls)}")
 
         # The tenant installer never reads its command (its Role is delete
         # only); admission refuses a tenant command with no target.
         name = (
-            f"{kind}: an empty sycophant.md/target stops the install before "
-            "helm and leaves its command")
+            f"{kind}: an empty sycophant.md/target is refused before helm "
+            "and leaves its command")
         rc, calls = run_job(job, 0, target="")
-        check(name, None if rc != 0 and not helms(calls)
+        check(name, None if rc == refused(job) and not helms(calls)
               and not command_deletes(calls, c["command"], c["command_ns"])
               else f"rc={rc}, calls={show(calls)}")
 
@@ -709,24 +720,27 @@ else:
                                   "tenant-acme")
           else f"rc={rc}, calls={show(calls)}")
 
-    for label, members in (
-        ("a symlink", [
+    for label, archive in (
+        ("a symlink", archive_of([
             ("AGENTS.md", "file", b"x\n"),
             ("ln", "symlink", "/etc/passwd")
-        ]),
-        ("a path outside its folder", [
+        ])),
+        ("a path outside its folder", archive_of([
             ("AGENTS.md", "file", b"x\n"),
             ("../evil.md", "file", b"x\n")
-        ]),
-        ("an unsafe name", [("AGENTS.md", "file", b"x\n"),
-                            ("a?b.md", "file", b"x\n")]),
+        ])),
+        ("an unsafe name", archive_of([
+            ("AGENTS.md", "file", b"x\n"),
+            ("a?b.md", "file", b"x\n")
+        ])),
+        ("bytes that are not gzip", base64.b64encode(b"x\n").decode()),
+        ("a stray character after its base64", good + "!"),
     ):
         name = (
-            f"instructions: an archive holding {label} fails before any store "
-            "call and leaves its command")
-        rc, calls = run_job(inst, 0,
-                            json.dumps({"archive": archive_of(members)}))
-        check(name, None if rc != 0 and not store_calls(calls)
+            f"instructions: an archive holding {label} is refused before any "
+            "store call and leaves its command")
+        rc, calls = run_job(inst, 0, json.dumps({"archive": archive}))
+        check(name, None if rc == refused(inst) and not store_calls(calls)
               and not restarts(calls)
               and not command_deletes(calls, cases["instructions"]["command"],
                                       "tenant-acme")
@@ -780,15 +794,15 @@ else:
         ),
     ):
         name = (
-            f"instructions: an AGENTS.md with {label} fails before any store "
-            "call and leaves its command")
+            f"instructions: an AGENTS.md with {label} is refused before any "
+            "store call and leaves its command")
         shutil.rmtree(os.path.join(work, "store"), ignore_errors=True)
         rc, calls = run_job(inst, 0,
                             json.dumps({"archive": archive_of([(
                                 "AGENTS.md",
                                 "file", body
                             )])}))
-        check(name, None if rc != 0 and not store_calls(calls)
+        check(name, None if rc == refused(inst) and not store_calls(calls)
               and not restarts(calls)
               and not command_deletes(calls, cases["instructions"]["command"],
                                       "tenant-acme")

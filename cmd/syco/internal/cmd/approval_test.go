@@ -56,6 +56,27 @@ func (e *endlessYes) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// --- Prompt ---
+
+// The one-shot command and the TUI both show this prompt.
+func TestApprovalPromptStartsWithTheSubAgentPathBeforeTheTool(t *testing.T) {
+	const path = "sub/0a1b2c3d"
+	a, ok := toolApprovalOf(&commonpb.ServerRequest{
+		RequestId:  "req-sub",
+		ParamsJson: `{"tool":"Bash","input":"ls","dispatch":"` + path + `"}`,
+	})
+	if !ok {
+		t.Fatal("a request with an id is not read as an approval")
+	}
+	p := strings.TrimPrefix(a.prompt(), "⚙ ")
+	if !strings.HasPrefix(p, path) {
+		t.Fatalf("prompt %q does not start with %q", a.prompt(), path)
+	}
+	if i := strings.Index(p, "Bash"); i < len(path) {
+		t.Fatalf("prompt %q does not name tool Bash after %q", a.prompt(), path)
+	}
+}
+
 // --- One-shot ---
 
 func TestOneShotUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {

@@ -32,20 +32,15 @@ set -eu
 {{ include "sycophant.commandFetch" . }}
 {{ include "sycophant.commandTarget" . }}
 {{ include "sycophant.instructionsFolder" . }}
-printf '%s' "$CM" | jq -r '.data.archive // empty' | base64 -d > /tmp/archive.tgz
-tar -tvzf /tmp/archive.tgz > /tmp/list 2> /tmp/list.err
-if [ -s /tmp/list.err ] || grep -q ' -> ' /tmp/list || grep -qv '^[-d]' /tmp/list; then
-  echo "the archive holds a link, a special file or a path outside its folder; nothing was changed" >&2
+printf '%s' "$CM" | jq -r '.data.archive // empty' | base64 -d > /tmp/archive.tgz || refuse "the archive is not base64; nothing was changed"
+if ! tar -tvzf /tmp/archive.tgz > /tmp/list 2> /tmp/list.err || [ -s /tmp/list.err ] || grep -q ' -> ' /tmp/list || grep -qv '^[-d]' /tmp/list; then
   cat /tmp/list.err /tmp/list >&2
-  exit 1
+  refuse "the archive is unreadable or holds a link, a special file or a path outside its folder; nothing was changed"
 fi
 rm -rf /tmp/files
 mkdir /tmp/files
 tar -xzf /tmp/archive.tgz -C /tmp/files
-if [ -n "$(find /tmp/files -name '*[!A-Za-z0-9._-]*')" ]; then
-  echo "an archive name holds a character outside A-Z a-z 0-9 . _ -; nothing was changed" >&2
-  exit 1
-fi
+[ -z "$(find /tmp/files -name '*[!A-Za-z0-9._-]*')" ] || refuse "an archive name holds a character outside A-Z a-z 0-9 . _ -; nothing was changed"
 find /tmp/files -type f | while IFS= read -r f; do
   rc=0
   LC_ALL=C awk '
@@ -59,14 +54,8 @@ find /tmp/files -type f | while IFS= read -r f; do
   if [ "$rc" = 3 ]; then
     continue
   fi
-  if [ "$rc" != 0 ]; then
-    echo "${f#/tmp/files/}: frontmatter never closes; nothing was changed" >&2
-    exit 1
-  fi
-  if ! yq eval '.' - < /tmp/frontmatter > /dev/null; then
-    echo "${f#/tmp/files/}: frontmatter is not valid YAML; nothing was changed" >&2
-    exit 1
-  fi
+  [ "$rc" = 0 ] || refuse "${f#/tmp/files/}: frontmatter never closes; nothing was changed"
+  yq eval '.' - < /tmp/frontmatter > /dev/null || refuse "${f#/tmp/files/}: frontmatter is not valid YAML; nothing was changed"
 done
 curl -fsS -X DELETE "${FOLDER}?recursive=true"
 cd /tmp/files

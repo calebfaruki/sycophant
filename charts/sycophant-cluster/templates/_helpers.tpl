@@ -289,6 +289,14 @@ metadata:
     app.kubernetes.io/component: {{ .name }}
 spec:
   backoffLimit: 4
+  # A script refuses its command with refuse, which exits 42. A refusal fails
+  # the same way on every attempt, so it fails the Job at once.
+  podFailurePolicy:
+    rules:
+      - action: FailJob
+        onExitCodes:
+          operator: In
+          values: [42]
   activeDeadlineSeconds: 900
   ttlSecondsAfterFinished: 600
   template:
@@ -297,7 +305,7 @@ spec:
         {{- include "sycophant.labels" $ctx | nindent 8 }}
         app.kubernetes.io/component: {{ .name }}
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
       serviceAccountName: (( "{{ .name }}-" + variables.uid10 ))
       automountServiceAccountToken: false
       securityContext:
@@ -354,6 +362,7 @@ spec:
           command: [sh, -c]
           args:
             - |
+              refuse() { echo "$1" >&2; exit 42; }
               {{- .script | trim | nindent 14 }}
       volumes:
         - name: tmp
@@ -368,10 +377,10 @@ spec:
 
 {{- /* Read the command into CM; stop if it is gone or was replaced. */ -}}
 {{- define "sycophant.commandFetch" -}}
-CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json)" \
-  || { echo "command $COMMAND is gone; this attempt is stale" >&2; exit 1; }
+CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json --ignore-not-found)" \
+  || { echo "could not read command $COMMAND; this attempt is retried" >&2; exit 1; }
 CM_UID="$(printf '%s' "$CM" | jq -r '.metadata.uid')"
-[ "$CM_UID" = "$COMMAND_UID" ] || { echo "command $COMMAND was replaced (uid $CM_UID != $COMMAND_UID); this attempt is stale" >&2; exit 1; }
+[ "$CM_UID" = "$COMMAND_UID" ] || refuse "command $COMMAND was deleted or replaced (uid '$CM_UID' != $COMMAND_UID); this attempt is stale"
 {{- end -}}
 
 {{- /*
@@ -380,7 +389,7 @@ name is only its hash.
 */ -}}
 {{- define "sycophant.commandTarget" -}}
 TARGET="$(printf '%s' "$CM" | jq -r '.metadata.annotations["{{ include "sycophant.targetAnnotation" . }}"] // ""')"
-[ -n "$TARGET" ] || { echo "command $COMMAND carries no {{ include "sycophant.targetAnnotation" . }}; nothing was changed" >&2; exit 1; }
+[ -n "$TARGET" ] || refuse "command $COMMAND carries no {{ include "sycophant.targetAnnotation" . }}; nothing was changed"
 {{- end -}}
 
 {{- /*

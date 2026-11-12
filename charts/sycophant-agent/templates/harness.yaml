@@ -160,6 +160,9 @@ spec:
               memory: "256Mi"
           env:
             - { name: RELAY_GATEWAY_ADDR, value: "http://relay-controller:9090" }
+            # The image of every sub-agent's harness Job. Admission requires
+            # it to equal this container's image.
+            - { name: HARNESS_IMAGE, value: "{{ $.Values.harness.image }}:{{ $.Values.harness.tag }}" }
             {{- range $k, $v := include "sycophant.harnessEnv" $ | fromYaml }}
             - { name: {{ $k }}, value: {{ $v | quote }} }
             {{- end }}
@@ -251,6 +254,28 @@ spec:
     app.kubernetes.io/part-of: sycophant
   ports:
     - { name: relay-fwd, port: 9091, targetPort: relay-fwd }
+---
+# Headless Service for this agent's sub-agents' harnesses: one record per
+# ready pod, `<sub>-<id>.ag-<name>-dispatch.<ns>.svc.cluster.local`, where the
+# pod's hostname is `<sub>-<id>`. The agent's harness attaches to each record
+# and, after a restart, lists them all with one SRV query.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ag-{{ $name }}-dispatch
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.agentLabels" (dict "context" $ "name" $name) | nindent 4 }}
+    sycophant.md/agent: {{ $name }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/component: harness
+    app.kubernetes.io/part-of: sycophant
+    sycophant.md/parent: {{ $name }}
+  ports:
+    - { name: dispatch, port: 9092, targetPort: 9092 }
 {{- end }}
 ---
 # Per-agent headless Service publishing one per-pod DNS record per

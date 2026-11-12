@@ -11,6 +11,7 @@ metadata:
 spec:
   try:
     - assert:
+        timeout: 90s
         resource:
           apiVersion: admissionregistration.k8s.io/v1
           kind: ValidatingAdmissionPolicyBinding

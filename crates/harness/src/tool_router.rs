@@ -28,6 +28,7 @@ use crate::agent_state::AgentState;
 use crate::channel_stream_tools;
 use crate::clients::RelayRpc;
 use crate::dispatch::DispatchState;
+use crate::dispatch_hub::DispatchHub;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
 use crate::instructions::Instructions;
 use crate::runtime_tools::{self, DispatchAbort};
@@ -109,6 +110,9 @@ pub(crate) struct ToolRouter {
     /// calls spawn the tool Job and drain its result here. `None` leaves the
     /// Toolset arm answering "tool dispatch is not configured".
     dispatch: Option<Arc<DispatchState>>,
+    /// The agent's sub-agents, backing `StartSubAgent`. `None` in a
+    /// sub-agent's own harness.
+    hub: Option<Arc<DispatchHub>>,
 }
 
 /// One live dispatch/await/cancel session's shared state. Its one
@@ -253,6 +257,7 @@ impl ToolRouter {
             toolset_secrets: HashMap::new(),
             calls: Arc::new(RwLock::new(HashMap::new())),
             dispatch: None,
+            hub: None,
         }
     }
 
@@ -272,6 +277,21 @@ impl ToolRouter {
     /// so `Source::Toolset` agent-turn calls run locally.
     pub(crate) fn with_dispatch(mut self, dispatch: Arc<DispatchState>) -> Self {
         self.dispatch = Some(dispatch);
+        self
+    }
+
+    /// Offer `StartSubAgent`, backed by `hub`.
+    pub(crate) fn with_sub_agents(mut self, hub: Arc<DispatchHub>) -> Self {
+        let mut tools = (**self.tools.load()).clone();
+        tools.push(CatalogEntry {
+            info: runtime_tools::start_sub_agent_definition(),
+            source: Source::Runtime,
+            args: Vec::new(),
+            secrets: Vec::new(),
+        });
+        tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+        self.tools.store(Arc::new(tools));
+        self.hub = Some(hub);
         self
     }
 
@@ -397,35 +417,39 @@ impl ToolRouter {
         input_json: &str,
         has_client: bool,
         tool_call_id: &str,
-        // The parent turn's cancel token. The `Toolset` and `ChannelStream`
-        // arms race it against their wait; the `Runtime` arm ignores it.
+        // The parent turn's cancel token. The approval request and the
+        // `Toolset` and `ChannelStream` arms race it against their wait; a
+        // `Runtime` tool ignores it once approved.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
             .source_of(name)
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
+        if let Approval::Refused(refusal) = self.ask_approval(name, input_json, cancel).await? {
+            return Ok(refusal);
+        }
         match source {
             Source::Toolset => {
                 let dispatch = self.dispatch.clone().ok_or_else(|| {
                     DispatchAbort::Error("tool dispatch is not configured".into())
                 })?;
-                if let Approval::Refused(refusal) =
-                    self.ask_approval(name, input_json, cancel).await?
-                {
-                    return Ok(refusal);
-                }
                 self.dispatch_toolset_in_process(dispatch, name, input_json, cancel)
                     .await
             }
-            Source::Runtime => runtime_tools::dispatch(
-                name,
-                input_json,
-                &self.instructions,
-                &self.agent,
-                &self.agent_state,
-            )
-            .await
-            .map_err(DispatchAbort::Error),
+            Source::Runtime => match &self.hub {
+                Some(hub) if name == runtime_tools::START_SUB_AGENT_TOOL_NAME => {
+                    Ok(runtime_tools::dispatch_start_sub_agent(input_json, hub).await)
+                }
+                _ => runtime_tools::dispatch(
+                    name,
+                    input_json,
+                    &self.instructions,
+                    &self.agent,
+                    &self.agent_state,
+                )
+                .await
+                .map_err(DispatchAbort::Error),
+            },
             Source::ChannelStream => {
                 let mut gateway = self.relay_rpc().ok_or_else(|| {
                     DispatchAbort::Error("relay gateway client not configured".into())
@@ -813,7 +837,7 @@ mod tests {
             test_instructions(),
             TEST_AG.to_string(),
             None,
-            Arc::new(crate::test_doubles::load_agent_state(root.to_path_buf())),
+            Arc::new(crate::test_doubles::open_agent_state(root.to_path_buf())),
         )
     }
 
@@ -982,14 +1006,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_unknown_name_rejected() {
+    async fn a_router_not_given_the_hub_lists_no_start_sub_agent_and_calls_it_unknown() {
         let router = empty_router();
+        assert!(!names(&router).iter().any(|n| n == "StartSubAgent"));
         let cancel = CancellationToken::new();
         let err = router
-            .call_tool("Nope", "{}", false, "tc", &cancel)
+            .call_tool("StartSubAgent", "{}", false, "tc", &cancel)
             .await
             .unwrap_err();
-        assert_dispatch_error(err, "unknown tool");
+        assert_dispatch_error(err, "unknown tool: StartSubAgent");
     }
 
     #[tokio::test]
@@ -998,7 +1023,7 @@ mod tests {
         // instructions — no gRPC hop. Against an empty instructions it returns
         // an empty array (not an "unknown tool" or "not configured" error),
         // proving the call reached the in-process instructions reader.
-        let router = empty_router();
+        let router = empty_router().with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let cancel = CancellationToken::new();
         let resp = router
             .call_tool("ListInstructions", "{}", false, "tc", &cancel)
@@ -2147,36 +2172,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_that_need_no_approval_run_without_an_approval_request() {
+    async fn every_tool_call_asks_for_approval_once_and_runs_once_approved() {
+        use crate::dispatch_hub::test_support::{endpoints, silent_endpoint, test_hub};
         let root = tempfile::TempDir::new().unwrap().keep();
         write_md(&root, &format!("{TEST_AG}/skills/a.md"), "# A\n\nAlpha.\n");
-        let relay = ScriptedRelay::new(vec![]);
+        // Seven approvals, plus the answers to the two requests to the user.
+        let answers = std::iter::repeat_with(RelayAnswer::approve);
+        let relay = ScriptedRelay::new(answers.take(9).collect());
+        let hub = test_hub(
+            endpoints(vec![], silent_endpoint()),
+            ScriptedRelay::default(),
+            vec![],
+        );
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Instructions::new(root)),
             TEST_AG.to_string(),
             None,
             test_agent_state(),
         )
-        .with_relay(relay.clone());
+        .with_relay(relay.clone())
+        .with_sub_agents(hub.hub);
 
-        for (name, input) in [
+        let tools = [
             ("RevealPath", r#"{"path":"/tmp/x"}"#),
             ("RequestUserInput", r#"{"prompt":"which?"}"#),
             ("RequestUserAuth", r#"{"provider":"x"}"#),
             ("ReadInstructions", r#"{"path":"skills/a.md"}"#),
             ("ListInstructions", "{}"),
             ("Think", r#"{"note":"n"}"#),
-        ] {
+            ("StartSubAgent", r#"{"sub_agent":"sub","mandate":"m"}"#),
+        ];
+        for (name, input) in tools {
             let resp = router
                 .call_tool(name, input, true, "tc", &CancellationToken::new())
                 .await
-                .unwrap_or_else(|e| panic!("{name} runs, got {e:?}"));
-            assert!(!resp.is_error, "{name} runs, got {:?}", text_of(&resp));
+                .unwrap_or_else(|e| panic!("{name} ends in a tool result, got {e:?}"));
+            assert!(
+                !resp.is_error,
+                "{name} works once approved, got {:?}",
+                text_of(&resp)
+            );
         }
-        assert!(
-            relay.requests_for(APPROVAL).is_empty(),
-            "none of these tools asks for approval"
-        );
+        let asked: Vec<String> = relay
+            .requests_for(APPROVAL)
+            .iter()
+            .map(|r| {
+                let params: serde_json::Value = serde_json::from_str(&r.params_json).unwrap();
+                params["tool"].as_str().unwrap_or_default().to_string()
+            })
+            .collect();
+        let want: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
+        assert_eq!(asked, want, "each tool call records one approval request");
     }
 
     #[tokio::test]
@@ -2341,5 +2387,132 @@ mod tests {
 
         assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
         assert_eq!(relay.requests_for(APPROVAL).len(), 2);
+    }
+
+    const START: &str = "StartSubAgent";
+
+    /// A hub whose attaches dial `endpoint`, with the router that offers it.
+    fn start_router(
+        endpoint: String,
+        relay: ScriptedRelay,
+    ) -> (crate::dispatch_hub::test_support::TestHub, ToolRouter) {
+        use crate::dispatch_hub::test_support::{endpoints, test_hub};
+        let h = test_hub(
+            endpoints(vec![], endpoint),
+            ScriptedRelay::default(),
+            vec![],
+        );
+        let router = empty_router()
+            .with_relay(relay)
+            .with_sub_agents(h.hub.clone());
+        (h, router)
+    }
+
+    #[tokio::test]
+    async fn each_start_sub_agent_call_returns_a_new_path_folder_and_job_before_any_attach() {
+        use crate::dispatch_hub::test_support::silent_endpoint;
+        use crate::job::tests::container_env;
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()]);
+        let (h, router) = start_router(silent_endpoint(), relay);
+
+        let mut paths = Vec::new();
+        for mandate in ["first job", "second job"] {
+            let input = serde_json::json!({ "sub_agent": "sub", "mandate": mandate });
+            let input = input.to_string();
+            let cancel = CancellationToken::new();
+            let call = router.call_tool(START, &input, false, "tc", &cancel);
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+                .await
+                .expect("the call returns while no sub-agent has attached")
+                .expect("a tool result");
+            assert!(!resp.is_error, "{}", text_of(&resp));
+            paths.push(text_of(&resp));
+        }
+
+        for path in &paths {
+            let id = path.strip_prefix("sub/").unwrap_or_default();
+            assert!(
+                id.len() == 8
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "want sub/<8 lowercase hex>, got {path}"
+            );
+            assert!(h.root.join(path).is_dir(), "no folder for {path}");
+        }
+        assert_ne!(paths[0], paths[1], "each call gets its own id");
+        let jobs = h.jobs.lock().unwrap();
+        let envs: Vec<_> = jobs
+            .iter()
+            .map(|j| {
+                (
+                    container_env(j, "DISPATCH_PATH"),
+                    container_env(j, "MANDATE"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs,
+            [
+                (Some(paths[0].as_str()), Some("first job")),
+                (Some(paths[1].as_str()), Some("second job")),
+            ],
+            "each call creates one Job with its own path and mandate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_start_or_a_refused_job_is_an_error_with_no_job_or_folder() {
+        use crate::dispatch_hub::test_support::silent_endpoint;
+        let relay = ScriptedRelay::new(vec![RelayAnswer::deny(), RelayAnswer::approve()]);
+        let (h, router) = start_router(silent_endpoint(), relay);
+
+        // `sub` is denied. `other` is approved, and admission refuses its Job.
+        for sub_agent in ["sub", "other"] {
+            let input = serde_json::json!({ "sub_agent": sub_agent, "mandate": "m" }).to_string();
+            let resp = router
+                .call_tool(START, &input, false, "tc", &CancellationToken::new())
+                .await
+                .expect("a tool result");
+            assert!(resp.is_error, "{sub_agent}: {}", text_of(&resp));
+            assert!(!h.root.join(sub_agent).exists(), "a folder for {sub_agent}");
+        }
+        assert!(h.jobs.lock().unwrap().is_empty(), "no Job is admitted");
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_starts_a_sub_agent_ends_while_the_sub_agent_stays_attached() {
+        use crate::clients::RelayRpc;
+        use crate::dispatch_hub::test_support::{next_queued, serve, sub_agent_link};
+        use crate::job::tests::container_env;
+        let link = sub_agent_link();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]);
+        let (h, router) = start_router(serve(link.clone()), relay);
+        let input = r#"{"sub_agent":"sub","mandate":"m"}"#;
+        let mut turns = ScriptedTurns::new(vec![
+            complete_turn(StopReason::ToolUse, "", &[("tc1", START, input)]),
+            complete_turn(StopReason::EndTurn, "done", &[]),
+        ]);
+
+        let result = run_primary_turn(&router, &mut turns).await;
+        assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
+
+        let mut reply = link.clone();
+        reply
+            .deliver_reply(proto_common::text_content("the answer"))
+            .await
+            .unwrap();
+        let queued = next_queued(&h.agent_state).await;
+        let path = h
+            .jobs
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|j| container_env(j, "DISPATCH_PATH").map(str::to_string));
+        assert_eq!(
+            (Some(queued.sender), queued.text),
+            (path, "the answer".to_string()),
+            "the attach outlives the turn and queues the later answer"
+        );
     }
 }

@@ -78,29 +78,10 @@ spec:
                 pod-security.kubernetes.io/warn=restricted \
                 pod-security.kubernetes.io/audit=restricted \
                 --overwrite
-    - name: wait-for-kyverno-generate
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              for i in $(seq 1 240); do
-                if kubectl get clusterrolebinding \
-                     "${TENANT_NS}-relay-tokenreview" \
-                     >/dev/null 2>&1 && \
-                   kubectl get validatingadmissionpolicybinding \
-                     "${TENANT_NS}-sycophant-pod-binding" >/dev/null 2>&1; then
-                  exit 0
-                fi
-                sleep 0.5
-              done
-              echo "timed out waiting 120s for Kyverno to generate per-tenant wiring" >&2
-              exit 1
     - name: assert-relay-tokenreview-crb
       try:
         - assert:
+            timeout: 90s
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRoleBinding

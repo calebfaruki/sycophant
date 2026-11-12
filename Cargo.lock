@@ -879,6 +879,7 @@ dependencies = [
  "bytes",
  "chrono",
  "harness-proto",
+ "hickory-resolver",
  "http-body-util",
  "hyper",
  "hyper-util",

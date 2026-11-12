@@ -12,12 +12,14 @@ use tokio::sync::RwLock;
 
 use crate::agent_state::AgentState;
 use crate::conversation::{tool_turn_as_text, ConversationLog};
+use crate::dispatch_hub::DispatchHub;
 use crate::instructions::{page, slice_lines, strip_frontmatter, Instructions, InstructionsError};
 
 const READ_INSTRUCTIONS_TOOL_NAME: &str = "ReadInstructions";
 const LIST_INSTRUCTIONS_TOOL_NAME: &str = "ListInstructions";
 const THINK_TOOL_NAME: &str = "Think";
 const READ_ARCHIVE_TOOL_NAME: &str = "ReadArchive";
+pub(crate) const START_SUB_AGENT_TOOL_NAME: &str = "StartSubAgent";
 
 /// Cap on the paths `ListInstructions` returns and the primary prompt's tree map
 /// lists.
@@ -130,6 +132,39 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     ]
 }
 
+/// `StartSubAgent`, offered only by a harness that is not a sub-agent's own.
+pub(crate) fn start_sub_agent_definition() -> ToolInfo {
+    ToolInfo {
+        toolset: String::new(),
+        name: START_SUB_AGENT_TOOL_NAME.into(),
+        description: "Start one of this agent's sub-agents on a mandate. Returns its path, \
+                      `<sub_agent>/<id>`, at once. Its final answer arrives later as a \
+                      message from that path."
+            .into(),
+        parameters_json: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sub_agent": {
+                    "type": "string",
+                    "description": "Name of the sub-agent to start."
+                },
+                "mandate": {
+                    "type": "string",
+                    "description": "The task the sub-agent works on alone."
+                }
+            },
+            "required": ["sub_agent", "mandate"]
+        })
+        .to_string(),
+    }
+}
+
+#[derive(Deserialize)]
+struct StartSubAgentArgs {
+    sub_agent: String,
+    mandate: String,
+}
+
 #[derive(Deserialize)]
 struct ReadArgs {
     path: String,
@@ -211,6 +246,28 @@ fn dispatch_read(
             is_error: true,
         }),
         Err(InstructionsError::Io(e)) => Err(format!("io error: {e}")),
+    }
+}
+
+/// `StartSubAgent(sub_agent, mandate)`: the new sub-agent's path, or the
+/// error that kept it from starting.
+pub(crate) async fn dispatch_start_sub_agent(
+    input_json: &str,
+    hub: &std::sync::Arc<DispatchHub>,
+) -> CallToolResponse {
+    let started = match serde_json::from_str::<StartSubAgentArgs>(input_json) {
+        Ok(args) => hub.start(&args.sub_agent, &args.mandate).await,
+        Err(e) => Err(format!("invalid arguments: {e}")),
+    };
+    match started {
+        Ok(path) => CallToolResponse {
+            content: vec![text_block(path)],
+            is_error: false,
+        },
+        Err(e) => CallToolResponse {
+            content: vec![text_block(format!("StartSubAgent error: {e}"))],
+            is_error: true,
+        },
     }
 }
 
@@ -388,7 +445,7 @@ mod tests {
             record("user", "current-window"),
         )
         .unwrap();
-        let agent_state = AgentState::load(root.to_path_buf(), 10).await.unwrap();
+        let agent_state = AgentState::open(root.to_path_buf(), 10).await.unwrap();
 
         let error_text = |resp: Result<CallToolResponse, String>, input: &str| -> String {
             match resp {

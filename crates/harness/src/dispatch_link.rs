@@ -250,42 +250,19 @@ mod tests {
     use std::time::Duration;
 
     use harness_proto::dispatch_frame::Frame;
-    use harness_proto::dispatch_link_client::DispatchLinkClient;
-    use harness_proto::dispatch_link_server::DispatchLinkServer;
     use harness_proto::parent_frame;
     use proto_common::{StopReason, TurnState};
-    use tokio::sync::mpsc;
-    use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::StreamExt;
-    use tonic::transport::server::TcpIncoming;
-    use tonic::transport::Server;
     use tonic::Code;
 
     use super::*;
+    use crate::dispatch_hub::test_support::{attach_as, serve, sub_agent_link, PARENT_TOKEN};
     use crate::runtime_entrypoint::message_loop;
     use crate::test_doubles::{
         complete_turn, empty_agent_state, test_instructions, test_router, ScriptedTurns, TEST_AG,
     };
 
-    const PARENT: &str = "one";
-    const NAMESPACE: &str = "tenant-a";
     const PATH: &str = "sub/0a1b2c3d";
-    /// The parent agent's harness, `ag-one` in this dispatch's namespace.
-    const PARENT_TOKEN: &str = "tok-system:serviceaccount:tenant-a:ag-one";
-
-    /// TokenReview stand-in: token `tok-<username>` authenticates as
-    /// `<username>`.
-    struct UserTokens;
-
-    #[async_trait::async_trait]
-    impl TokenVerifier for UserTokens {
-        async fn verify_token(&self, token: &str) -> Result<String, Status> {
-            token
-                .strip_prefix("tok-")
-                .map(str::to_string)
-                .ok_or_else(|| Status::permission_denied("unknown token"))
-        }
-    }
 
     #[tokio::test]
     async fn dispatch_verifier_pins_the_dispatch_audience() {
@@ -298,63 +275,13 @@ mod tests {
         );
     }
 
-    fn link() -> ParentLink {
-        ParentLink::new(PARENT, NAMESPACE, Arc::new(UserTokens))
-    }
-
-    /// Serve `link` on an ephemeral port and return its dial endpoint.
-    fn serve(link: ParentLink) -> String {
-        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = incoming.local_addr().unwrap();
-        tokio::spawn(
-            Server::builder()
-                .add_service(DispatchLinkServer::new(link))
-                .serve_with_incoming(incoming),
-        );
-        format!("http://{addr}")
-    }
-
-    /// One attach: what the parent sends, and what the dispatch sends back.
-    struct Attached {
-        tx: mpsc::Sender<ParentFrame>,
-        frames: Streaming<DispatchFrame>,
-    }
-
-    impl Attached {
-        async fn next_frame(&mut self) -> Frame {
-            tokio::time::timeout(Duration::from_secs(5), self.frames.next())
-                .await
-                .expect("a frame within 5s")
-                .expect("the attach is open")
-                .expect("a frame, not an error")
-                .frame
-                .expect("a frame body")
-        }
-    }
-
-    /// Attach to `endpoint` with `Bearer <token>`, or with no token.
-    async fn attach_as(endpoint: &str, token: Option<&str>) -> Result<Attached, Status> {
-        let mut client = DispatchLinkClient::connect(endpoint.to_string())
-            .await
-            .expect("the dispatch link serves");
-        let (tx, rx) = mpsc::channel(8);
-        let mut request = Request::new(ReceiverStream::new(rx));
-        if let Some(token) = token {
-            request
-                .metadata_mut()
-                .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        }
-        let frames = client.attach(request).await?.into_inner();
-        Ok(Attached { tx, frames })
-    }
-
     fn final_answer(text: &str) -> Frame {
         Frame::FinalAnswer(text.to_string())
     }
 
     #[tokio::test]
     async fn attach_admits_only_the_parent_harness_service_account_in_its_own_namespace() {
-        let endpoint = serve(link());
+        let endpoint = serve(sub_agent_link());
         if let Err(e) = attach_as(&endpoint, Some(PARENT_TOKEN)).await {
             panic!("the parent agent's harness must be admitted, got {e:?}");
         }
@@ -389,7 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_mandate_alone_starts_the_only_turn_and_its_reply_reaches_the_attached_parent() {
-        let link = link();
+        let link = sub_agent_link();
         let endpoint = serve(link.clone());
         let mut parent = attach_as(&endpoint, Some(PARENT_TOKEN))
             .await
@@ -442,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_that_ends_with_no_reply_holds_dispatch_failed_and_its_reason() {
-        let link = link();
+        let link = sub_agent_link();
         let endpoint = serve(link.clone());
         let mut relay = link.clone();
         let _ = relay
@@ -464,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_attach_gets_the_held_answer_first_and_only_answer_taken_ends_the_dispatch() {
-        let link = link();
+        let link = sub_agent_link();
         let endpoint = serve(link.clone());
         let mut relay = link.clone();
         let _ = relay
@@ -498,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_approval_waits_for_a_parent_gets_its_answer_and_errors_when_its_attach_drops() {
-        let link = link();
+        let link = sub_agent_link();
         let endpoint = serve(link.clone());
         let ask = |id: &'static str| {
             let mut relay = link.clone();

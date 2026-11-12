@@ -1,7 +1,9 @@
 # Cilium values consumed by `sycoadm setup`.
 # DevOps users running their own Cilium install can ignore this file —
-# the requirement is "Cilium 1.19.x in kube-system with L7 DNS proxy
-# enabled and a pod CIDR matching the cluster's pod range".
+# the requirement is "Cilium 1.19.7 or later in kube-system with L7 DNS proxy
+# enabled and a pod CIDR matching the cluster's pod range". Before 1.19.7 the
+# L7 proxy ends any HTTP request silent for 60 s, such as a model call waiting
+# for the inference server's slot.
 
 # Match k3s's default pod IP range (10.42.0.0/16). Without this, Cilium
 # hands out pod IPs from its own default (10.0.0.0/8) and routing silently
@@ -23,7 +25,7 @@ operator:
 # Sycophant uses both L7 DNS (FQDN allowlist) and L7 HTTP (the inference
 # pod's route allowlist). This flag only chooses whether Envoy runs as a
 # standalone DaemonSet or on demand inside the cilium-agent pod; L7 HTTP is
-# enforced either way on the pinned Cilium 1.19.3, so the policy works with
+# enforced either way on the pinned Cilium 1.19.10, so the policy works with
 # it false.
 envoy:
   enabled: false

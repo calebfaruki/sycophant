@@ -5,6 +5,7 @@ mod clients;
 mod config;
 mod conversation;
 mod dispatch;
+mod dispatch_hub;
 mod dispatch_link;
 mod execution_log;
 mod grpc_server;
@@ -77,7 +78,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let conversation_dir = PathBuf::from(CONVERSATION_DIR);
     probe_dir_writable(&conversation_dir)?;
     conversation::write_logrotate_conf(&conversation_dir, config.archives)?;
-    let agent_state = Arc::new(AgentState::load(conversation_dir.clone(), config.archives).await?);
+    let agent_state = Arc::new(AgentState::open(conversation_dir.clone(), config.archives).await?);
     tracing::info!(dir = %conversation_dir.display(), "conversation store ready");
 
     // In-process instructions reader over the mounted read-only instructions volume. Each
@@ -120,12 +121,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // An agent talks to the relay. A dispatch talks to its parent agent's
     // harness, and its tool Jobs mount the parent's workspace.
-    let (relay, link, workspace_agent, seam) = match &config.mode {
-        Mode::Agent { relay_gateway_addr } => {
+    let (relay, link, seam) = match &config.mode {
+        Mode::Agent {
+            relay_gateway_addr, ..
+        } => {
             let relay = clients::RelayClient::connect(relay_gateway_addr).await?;
             tracing::info!(addr = %relay_gateway_addr, "connected to relay gateway");
             let seam = tool_router::relay_seam(relay.clone());
-            (Some(relay), None, config.agent.clone(), seam)
+            (Some(relay), None, seam)
         }
         Mode::Dispatch { parent, .. } => {
             let client = kube_client
@@ -137,22 +140,52 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(dispatch_verifier(client)),
             );
             let seam = tool_router::relay_seam(link.clone());
-            (None, Some(link), parent.clone(), seam)
+            (None, Some(link), seam)
         }
     };
-    let router = tool_router::ToolRouter::new(
+    // An agent with a kube client starts sub-agents. After a restart it notes
+    // and attaches to the ones still alive.
+    let hub = match (config.mode.harness_image(), kube_client.clone()) {
+        (Some(harness_image), Some(client)) => {
+            let (agent, namespace) = (config.agent.clone(), config.namespace.clone());
+            let hub = Arc::new(dispatch_hub::DispatchHub::new(
+                dispatch_hub::HubConfig {
+                    agent: agent.clone(),
+                    namespace: namespace.clone(),
+                    image: harness_image.to_string(),
+                    root: conversation_dir
+                        .parent()
+                        .unwrap_or(&conversation_dir)
+                        .to_path_buf(),
+                    token_path: shared::auth::HARNESS_DISPATCH_TOKEN_PATH.into(),
+                    endpoint: dispatch_hub::cluster_endpoint(agent.clone(), namespace.clone()),
+                },
+                dispatch_hub::kube_jobs(client, namespace.clone()),
+                dispatch_hub::srv_list(agent, namespace),
+                seam.clone(),
+                agent_state.clone(),
+            ));
+            hub.restart().await?;
+            Some(hub)
+        }
+        _ => None,
+    };
+    let mut router = tool_router::ToolRouter::new(
         instructions.clone(),
         config.agent.clone(),
         Some(seam),
         agent_state.clone(),
     );
+    if let Some(hub) = hub {
+        router = router.with_sub_agents(hub);
+    }
 
     let dispatch = DispatchState::new(
         kube_client,
         config.namespace.clone(),
         config.capability_service.clone(),
         config.agent.clone(),
-        &workspace_agent,
+        &config.mode,
         scheduling,
         toolset_config.clone(),
     );

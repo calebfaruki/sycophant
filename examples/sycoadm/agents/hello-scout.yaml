@@ -1,0 +1,9 @@
+# A sub-agent of hello-world. Only hello-world's harness starts it, with
+# StartSubAgent, and it answers only to hello-world. It has hello-world's
+# toolsets, and its tool Jobs mount hello-world's workspace.
+agent:
+  name: hello-scout
+  tenant: hello-world
+  toolsets: hello-world
+  model: qwen3-5-2b
+  parent: hello-world

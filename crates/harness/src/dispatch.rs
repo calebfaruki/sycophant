@@ -45,6 +45,7 @@ use toolset_proto::{RunInferenceCommand, TurnAssignment, TurnEvent, TurnRequest}
 use toolset_proto::turn_event;
 
 use crate::clients::{InferenceRpc, TurnSource};
+use crate::config::Mode;
 use crate::model_config::{ModelConfig, ModelTable, LOCAL_INFERENCE_PORT};
 use crate::{job, TOOL_JOB_PORT};
 
@@ -196,11 +197,11 @@ impl DispatchState {
         namespace: String,
         service_name: String,
         agent: String,
-        workspace_agent: &str,
+        mode: &Mode,
         scheduling: SchedulingConfig,
         toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
-        let workspace_pvc = format!("{AGENT_PREFIX}{workspace_agent}-workspace");
+        let workspace_pvc = format!("{AGENT_PREFIX}{}-workspace", mode.workspace_agent(&agent));
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
             result_txs: RwLock::new(HashMap::new()),
@@ -692,7 +693,7 @@ const DIAL_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Upper bound on a single dial attempt, so an address that resolves but never
 /// answers cannot hang a driver past its readiness window.
-const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Dial the serving pod and run one tool call to completion over a single
 /// `ToolJob.Run` stream. Sends the assignment as the first message, forwards the
@@ -1145,10 +1146,32 @@ mod tests {
             "ns".to_string(),
             "capability-ag".to_string(),
             "ag".to_string(),
-            "ag",
+            &Mode::Agent {
+                relay_gateway_addr: String::new(),
+                harness_image: String::new(),
+            },
             SchedulingConfig::default(),
             Arc::new(RwLock::new(ToolsetConfig::empty())),
         )
+    }
+
+    #[test]
+    fn a_sub_agents_tool_jobs_mount_its_parents_workspace() {
+        let mode = Mode::Dispatch {
+            path: "sub/0a1b2c3d".into(),
+            mandate: "m".into(),
+            parent: "one".into(),
+        };
+        let state = DispatchState::new(
+            None,
+            "ns".to_string(),
+            "capability-ag".to_string(),
+            "sub".to_string(),
+            &mode,
+            SchedulingConfig::default(),
+            Arc::new(RwLock::new(ToolsetConfig::empty())),
+        );
+        assert_eq!(state.spawn.workspace_pvc, "ag-one-workspace");
     }
 
     fn active(tool: &str, job_id: &str) -> ActiveJob {

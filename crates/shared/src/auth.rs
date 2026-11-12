@@ -196,6 +196,11 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 /// internal listener (Subscribe + the channel-stream server-request methods).
 pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token";
 
+/// On-disk mount path for the harness's dispatch-audience SA token, the
+/// `harness-dispatch-auth` volume. The agent's harness presents it on each
+/// attach to a sub-agent's harness.
+pub const HARNESS_DISPATCH_TOKEN_PATH: &str = "/var/run/secrets/harness/dispatch/token";
+
 /// On-disk mount path for the relay-controller's harness-audience
 /// SA token. The chart's relay-ctrl Deployment mounts a projected
 /// volume here. Used by relay to dial per-agent harness pods

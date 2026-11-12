@@ -319,9 +319,14 @@ deploy_agent_and_user() {
   "$SYCOADM" agent up -f "$REPO_ROOT/examples/sycoadm/agents/hello-world.yaml"
   "$SYCOADM" instructions up \
     -f "$REPO_ROOT/examples/sycoadm/instructions/hello-world.yaml"
+  # hello-world's sub-agent, on hello-world's instructions.
+  "$SYCOADM" agent up -f "$REPO_ROOT/examples/sycoadm/agents/hello-scout.yaml"
+  "$SYCOADM" instructions up \
+    -f "$REPO_ROOT/examples/sycoadm/instructions/hello-world.yaml" \
+    --set instructions.name=hello-scout
   "$SYCOADM" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${DEX_ISSUER}#${BOUND_USER_SUB}"
-  ok "sycoadm agent, instructions and user up: hello-world installed"
+  ok "sycoadm agent, instructions and user up: hello-world and hello-scout"
 }
 
 deploy_channel() {
@@ -368,22 +373,37 @@ relay_call() {
     "${TAILNET_RELAY_ADDR}" "relay.v1.RelayGateway/${method}"
 }
 
-# tool_chat <config-dir> <tool> <prompt>
-# One syco chat turn that must call <tool>. Every tool-call approval in the
-# turn is answered `y`, as a user would.
+# approve_after <out-file> [<line>]: the answers a user types. `y` to the
+# first approval, then `y` to every later one once <out-file> holds a line
+# matching the extended regex <line> or is gone.
+approve_after() {
+  printf 'y\n'
+  [ -z "${2:-}" ] || wait_for "syco chat to print $2" 300 \
+    "[ ! -e '$1' ] || grep -qE '$2' '$1'" >&2 || true
+  yes || true
+}
+
+# tool_chat <config-dir> <tool> <prompt> [<line>]
+# One syco chat turn that must call <tool> and, if given, print a line that
+# matches the extended regex <line>. Approvals are answered by approve_after,
+# so a turn held at its second approval stays open until <line> prints.
 tool_chat() {
-  local dir="$1" tool="$2" prompt="$3"
+  local dir="$1" tool="$2" prompt="$3" line="${4:-}"
   local out err
+  out="$(mktemp)"
   err="$(mktemp)"
-  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" \
-    2>"$err" < <(yes || true))"; then
-    warn "syco chat (${tool}) exited non-zero: ${out} $(cat "$err")"
-    rm -f "$err"
+  trap 'rm -f "'"$out"'" "'"$err"'"; trap - RETURN' RETURN
+  if ! SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" \
+    >"$out" 2>"$err" < <(approve_after "$out" "$line"); then
+    warn "syco chat (${tool}) exited non-zero: $(cat "$out" "$err")"
     return 1
   fi
-  rm -f "$err"
-  if ! printf '%s\n' "$out" | grep -F "⚙ ${tool} (started)" >/dev/null; then
-    warn "syco chat did not call ${tool}: ${out}"
+  if ! grep -F "⚙ ${tool} (started)" "$out" >/dev/null; then
+    warn "syco chat did not call ${tool}: $(cat "$out")"
+    return 1
+  fi
+  if ! grep -E "$line" "$out" >/dev/null; then
+    warn "syco chat did not print ${line}: $(cat "$out")"
     return 1
   fi
 }
@@ -501,7 +521,7 @@ TOML
 # End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
 # config, `syco login` with the Dex credentials, bind the resulting identity
 # to the hello-world agent, then `syco chat`. Then prove a killed one-shot's
-# message still lands and gets a reply.
+# message still lands and gets a reply, then start hello-scout.
 step_5b_syco_cli_chat() {
   # ── isolated config dir ──
   local SYCO_TMP
@@ -611,6 +631,19 @@ step_5b_syco_cli_chat() {
     return 1
   fi
   ok "hello-world got an assistant reply after the killed one-shot"
+
+  # hello-world starts its sub-agent hello-scout on a mandate that calls
+  # Shell. The turn's next call waits for approval until hello-scout's Shell
+  # asks, so this chat is open whenever hello-scout asks. It follows the
+  # one-shot check. A turn on hello-scout's answer sends its approvals to
+  # every open chat, and one printed in the one-shot's output fails that
+  # check.
+  if ! tool_chat "$SYCO_TMP" StartSubAgent "$SCOUT_PROMPT" \
+    "⚙ hello-scout/[^:]+: Shell wants to run"; then
+    return 1
+  fi
+  ok "syco chat completed with a StartSubAgent tool call"
+  ok "syco chat approved hello-scout's Shell call under its path"
 }
 
 # Join this host to this run's tailnet.
@@ -656,11 +689,13 @@ step_5_channel() {
 # ---- step 6: security assertions ----
 # attach_ephemeral_scrubber <namespace> <pod> <container-name>: attach an
 # ephemeral busybox to <pod>'s harness container, sharing its PID namespace.
+# It lives 1200 s: step 6's waits add up to 810 s, and the compact waits for
+# any turn in progress.
 attach_ephemeral_scrubber() {
   local ns="$1" pod="$2" container_name="$3"
   local patch
   patch="$(jq -nc --arg name "$container_name" '{spec: {ephemeralContainers: [{
-    name: $name, image: "busybox:1.36", command: ["sleep", "180"],
+    name: $name, image: "busybox:1.36", command: ["sleep", "1200"],
     targetContainerName: "harness",
     securityContext: {runAsNonRoot: true, runAsUser: 1000,
       readOnlyRootFilesystem: true, allowPrivilegeEscalation: false,
@@ -687,6 +722,35 @@ tool_result_texts() {
     | [.[] | select(.role == "tool"
         and ((.tool_call_id // "") as $i | $ids | index($i)) != null)
       | [.content[]?.block.Text.text // empty] | join("")]' "$1"
+}
+
+# A fresh file in hello-world's workspace for each e2e pass. Only
+# hello-scout's Shell creates it, and the workspace outlives a cluster reuse.
+SCOUT_FILE="/workspace/scout-$(date +%s)"
+readonly SCOUT_FILE
+
+# The StartSubAgent turn's prompt. Its mandate calls Shell, whose tool Job
+# mounts hello-world's workspace. Its second call holds the turn open. The
+# mandate ends the prompt, so no later sentence can be copied into it.
+readonly SCOUT_PROMPT="Use the StartSubAgent tool to start sub_agent \
+hello-scout, then use the ListInstructions tool. The mandate for hello-scout \
+is: Use the Shell tool to execute the command 'touch ${SCOUT_FILE} && echo \
+marigold', then reply with only its output."
+
+# sub_agent_answered <tb_pod> <scrub_c> <conv-log> <log-file>
+# Copies the conversation log out to <log-file> and holds when a user entry
+# after the SCOUT_PROMPT entry holds "marigold": hello-scout's final answer,
+# queued to hello-world.
+sub_agent_answered() {
+  local tb_pod="$1" scrub_c="$2" conv_log="$3" log="$4"
+  kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+    cat "$conv_log" >"$log" 2>/dev/null || return 1
+  jq -s -e --arg m "$SCOUT_PROMPT" '
+    [.[] | select(.role == "user")
+      | [.content[]?.block.Text.text // empty] | join("")] as $u
+    | ($u | index($m)) as $i
+    | $i != null and any($u[$i + 1:][]; ascii_downcase | contains("marigold"))
+  ' "$log" >/dev/null
 }
 
 # conversation_has_result <tb_pod> <scrub_c> <conv-log> <tool> <jq-test>
@@ -730,6 +794,15 @@ assert_tool_results() {
     local texts
     texts="$(tool_result_texts "$log" WebFetch 2>/dev/null || true)"
     warn "WebFetch result is not a network error: ${texts}"
+    return 1
+  fi
+
+  # hello-scout's final answer is queued to hello-world as a user entry.
+  if wait_for "hello-scout's final answer in the conversation log" 600 \
+    "sub_agent_answered '$tb_pod' '$scrub_c' '$conv_log' '$log'"; then
+    ok "hello-scout's final answer reached hello-world's conversation.log"
+  else
+    warn "no user entry after the StartSubAgent prompt holds 'marigold'"
     return 1
   fi
 }
@@ -796,19 +869,16 @@ archive_hash() {
   }
 }
 
-# assert_compaction <tb_pod> <conv_root>: compact hello-world's conversation
-# over the relay. Its window becomes archive 1 (`conversation.log.1.gz`, still
-# holding this run's redaction marker), conversation.log holds the summary
-# alone, and the demo secret value is still in no file, inside the archives
-# included. On a reused cluster `.1.gz` is always this run's newest archive.
+# assert_compaction <tb_pod> <scrub_c> <conv_root>: compact hello-world's
+# conversation over the relay. Its window becomes archive 1
+# (`conversation.log.1.gz`, still holding this run's redaction marker),
+# conversation.log holds the summary alone, and the demo secret value is still
+# in no file, inside the archives included. On a reused cluster `.1.gz` is
+# always this run's newest archive.
 assert_compaction() {
-  local tb_pod="$1" conv_root="$2"
-  # The step-6 scrubber sleeps only 180 s; this check gets its own.
-  local scrub_c="scrub-compact-$$"
-  attach_ephemeral_scrubber "$NAMESPACE" "$tb_pod" "$scrub_c"
+  local tb_pod="$1" scrub_c="$2" conv_root="$3"
   local conv_log="$conv_root/conversation.log" \
     archive="$conv_root/conversation.log.1.gz"
-  wait_for_conversation_log "$tb_pod" "$scrub_c" "$conv_log" || return 1
 
   local token
   token="$(mint_dex_token "$BOUND_USER_SUB")"
@@ -944,8 +1014,20 @@ step_6_security() {
   wait_for_conversation_log "$tb_pod" "$scrub_c" "$conv_log" || return 1
 
   assert_tool_results "$tb_pod" "$scrub_c" "$conv_log"
+  if ! kubectl exec -n "$NAMESPACE" "$task_pod" -- test -e "$SCOUT_FILE"; then
+    warn "hello-world's workspace has no ${SCOUT_FILE}"
+    return 1
+  fi
+  if jq -s -e --arg f "$SCOUT_FILE" 'any(.[] | select(.role == "assistant")
+    | .tool_calls[]? | select(.name == "Shell"); .input_json | contains($f))' \
+    <(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- cat "$conv_log") \
+    >/dev/null; then
+    warn "hello-world's own Shell call names ${SCOUT_FILE}"
+    return 1
+  fi
+  ok "hello-scout's tool Job wrote ${SCOUT_FILE} in hello-world's workspace"
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$conv_log"
-  assert_compaction "$tb_pod" "$conv_root"
+  assert_compaction "$tb_pod" "$scrub_c" "$conv_root"
   assert_toolset_secrets
   dispatch_security_substeps
 }
@@ -1451,7 +1533,8 @@ instructions_probe() {
   if ! wait_for "the installer Job refused the unclosed frontmatter" 120 \
     "kubectl get jobs -n sycophant-system -o json | jq -e '[.items[] |
       select(.metadata.name | startswith(\"provision-instructions-\")) |
-      select((.status.failed // 0) > 0)] | length > 0' >/dev/null"; then
+      select(any(.status.conditions[]?; .type == \"Failed\" and
+        .reason == \"PodFailurePolicy\"))] | length > 0' >/dev/null"; then
     return 1
   fi
   if ! kubectl get configmap "$command" -n "$ns" >/dev/null 2>&1; then

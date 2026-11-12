@@ -235,21 +235,21 @@ fn turn_outcome_frame(
             TurnStateEvent {
                 state: TurnState::Failed as i32,
                 message_id: message_id.to_string(),
-                reason: loop_error_reason(e).to_string(),
+                reason: loop_error_reason(e),
                 code: "13".into(),
             },
         ),
     }
 }
 
-fn loop_error_reason(e: &LoopError) -> &'static str {
+fn loop_error_reason(e: &LoopError) -> String {
     match e {
-        LoopError::Halt(LoopHalt::IterationLimit { .. }) => "iteration limit reached",
-        LoopError::Halt(LoopHalt::UnknownStop(_)) => "unexpected stop reason",
-        LoopError::Halt(LoopHalt::MaxTokens(_)) => "response truncated",
-        LoopError::Inference(_) => "model call failed",
-        LoopError::StreamEnded(_) => "turn stream ended",
-        LoopError::Cancelled => "turn cancelled",
+        LoopError::Halt(LoopHalt::IterationLimit { .. }) => "iteration limit reached".into(),
+        LoopError::Halt(LoopHalt::UnknownStop(_)) => "unexpected stop reason".into(),
+        LoopError::Halt(LoopHalt::MaxTokens(_)) => "response truncated".into(),
+        LoopError::Inference(_) => "model call failed".into(),
+        LoopError::StreamEnded(m) => format!("turn stream ended: {m}"),
+        LoopError::Cancelled => "turn cancelled".into(),
     }
 }
 
@@ -414,6 +414,13 @@ mod tests {
             let res = handle_llm_loop_result(result);
             assert_eq!(res.err().as_deref(), want_err, "{case}");
         }
+    }
+
+    #[test]
+    fn a_stream_end_reason_keeps_its_cause() {
+        let cause = "turn error 0: model call failed: API error 504 Gateway Timeout";
+        let (_, ts) = turn_outcome_frame("c", &Err(LoopError::StreamEnded(cause.into())));
+        assert_eq!(ts.reason, format!("turn stream ended: {cause}"));
     }
 
     #[test]

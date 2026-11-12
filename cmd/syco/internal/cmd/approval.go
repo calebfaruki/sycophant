@@ -21,9 +21,14 @@ type toolApproval struct {
 	requestID string
 	tool      string
 	input     string
+	// dispatch is the sub-agent path, <sub>/<id>, when a sub-agent asks.
+	dispatch string
 }
 
 func (a toolApproval) prompt() string {
+	if a.dispatch != "" {
+		return fmt.Sprintf("⚙ %s: %s wants to run with input: %s", a.dispatch, a.tool, a.input)
+	}
 	return fmt.Sprintf("⚙ %s wants to run with input: %s", a.tool, a.input)
 }
 
@@ -34,11 +39,17 @@ func toolApprovalOf(sr *commonpb.ServerRequest) (toolApproval, bool) {
 		return toolApproval{}, false
 	}
 	var params struct {
-		Tool  string `json:"tool"`
-		Input string `json:"input"`
+		Tool     string `json:"tool"`
+		Input    string `json:"input"`
+		Dispatch string `json:"dispatch"`
 	}
 	_ = json.Unmarshal([]byte(sr.GetParamsJson()), &params)
-	return toolApproval{requestID: sr.GetRequestId(), tool: params.Tool, input: params.Input}, true
+	return toolApproval{
+		requestID: sr.GetRequestId(),
+		tool:      params.Tool,
+		input:     params.Input,
+		dispatch:  params.Dispatch,
+	}, true
 }
 
 // approvalAnswer is the ingest that answers an approval request.

@@ -10,6 +10,8 @@ use crate::conversation::MAX_ARCHIVES;
 pub(crate) enum Mode {
     Agent {
         relay_gateway_addr: String,
+        /// The image every sub-agent's harness runs, from `HARNESS_IMAGE`.
+        harness_image: String,
     },
     Dispatch {
         /// `<sub-agent>/<id>`, from `DISPATCH_PATH`.
@@ -19,6 +21,26 @@ pub(crate) enum Mode {
         /// The agent this sub-agent belongs to, from `PARENT`.
         parent: String,
     },
+}
+
+impl Mode {
+    /// The image a sub-agent's harness uses. Only an agent has one, so only
+    /// an agent starts sub-agents.
+    pub(crate) fn harness_image(&self) -> Option<&str> {
+        match self {
+            Mode::Agent { harness_image, .. } => Some(harness_image),
+            Mode::Dispatch { .. } => None,
+        }
+    }
+
+    /// The agent whose workspace volume this harness's tool Jobs mount: a
+    /// sub-agent's parent, otherwise `agent`.
+    pub(crate) fn workspace_agent<'a>(&'a self, agent: &'a str) -> &'a str {
+        match self {
+            Mode::Agent { .. } => agent,
+            Mode::Dispatch { parent, .. } => parent,
+        }
+    }
 }
 
 pub(crate) struct HarnessConfig {
@@ -64,6 +86,8 @@ impl HarnessConfig {
             Err(_) => Mode::Agent {
                 relay_gateway_addr: std::env::var("RELAY_GATEWAY_ADDR")
                     .map_err(|_| "RELAY_GATEWAY_ADDR is required")?,
+                harness_image: std::env::var("HARNESS_IMAGE")
+                    .map_err(|_| "HARNESS_IMAGE is required")?,
             },
         };
 
@@ -217,6 +241,32 @@ mod tests {
             parse_toolset_secrets(r#"{"env.ssh.k":"/p"}"#).unwrap_err(),
             "env.ssh.k is not secret.<toolset>.<secret-name>"
         );
+    }
+
+    // The env a sub-agent's Job gives its harness: no relay address and no
+    // harness image. Only this test sets these variables.
+    #[test]
+    fn a_sub_agent_env_with_no_relay_address_loads_with_no_image() {
+        for (key, value) in [
+            ("DISPATCH_PATH", "sub/0a1b2c3d"),
+            ("MANDATE", "m"),
+            ("PARENT", "one"),
+            ("AGENT_NAME", "sub"),
+            ("CAPABILITY_SERVICE_NAME", "ag-sub-capability"),
+            ("ARCHIVES", "10"),
+        ] {
+            std::env::set_var(key, value);
+        }
+        std::env::remove_var("RELAY_GATEWAY_ADDR");
+        std::env::remove_var("HARNESS_IMAGE");
+
+        let config = HarnessConfig::from_env().unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            &config.mode,
+            Mode::Dispatch { path, mandate, parent }
+                if path == "sub/0a1b2c3d" && mandate == "m" && parent == "one"
+        ));
+        assert_eq!(config.mode.harness_image(), None, "no sub-agents to start");
     }
 
     #[test]

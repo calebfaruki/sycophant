@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use proto_common::{text_block, Message};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -30,7 +31,7 @@ impl AgentState {
     /// `<root>/execution.json`, then build the in-memory window from
     /// `conversation.log` alone; archives are never loaded into the context.
     /// Every tool call the previous run left open gets a restart entry.
-    pub(crate) async fn load(root: PathBuf, archives: u32) -> Result<Self, String> {
+    pub(crate) async fn open(root: PathBuf, archives: u32) -> Result<Self, String> {
         for name in [CONVERSATION_FILENAME, EXECUTION_LOG_FILENAME] {
             cut_torn_tail(root.join(name)).await?;
         }
@@ -48,6 +49,30 @@ impl AgentState {
 
     pub(crate) fn log(&self) -> &RwLock<ConversationLog> {
         &self.log
+    }
+
+    /// After a restart, a non-empty log gets one user entry naming the
+    /// sub-agents' harnesses still alive at `paths`.
+    pub(crate) async fn note_restart(&self, paths: &[String]) -> Result<(), String> {
+        let mut log = self.log.write().await;
+        if log.is_empty() {
+            return Ok(());
+        }
+        let alive = if paths.is_empty() {
+            "none".to_string()
+        } else {
+            paths.join(", ")
+        };
+        log.append(Message {
+            role: "user".into(),
+            content: vec![text_block(format!(
+                "[agent restarted] Alive sub-agent dispatches: {alive}"
+            ))],
+            tool_calls: vec![],
+            tool_call_id: None,
+            is_error: None,
+        })
+        .await
     }
 
     pub(crate) fn execution_log(&self) -> Arc<dyn ExecutionLogWriter> {
@@ -112,7 +137,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_reports_true_only_for_a_turn_in_flight_and_fires_its_token() {
         let root = tempfile::TempDir::new().unwrap();
-        let agent_state = AgentState::load(root.path().to_path_buf(), 10)
+        let agent_state = AgentState::open(root.path().to_path_buf(), 10)
             .await
             .unwrap();
         assert!(!agent_state.cancel(), "an idle agent reports no turn");
@@ -138,7 +163,7 @@ mod tests {
     // conversation's entries. A file that is empty or ends in a newline is
     // left byte-equal, and a missing file is not created.
     #[tokio::test]
-    async fn load_cuts_a_torn_last_line_before_building_the_window() {
+    async fn open_cuts_a_torn_last_line_before_building_the_window() {
         use std::fs;
 
         let good = crate::test_doubles::record("user", "good").into_bytes();
@@ -159,14 +184,14 @@ mod tests {
             let exec = tmp.path().join("execution.json");
             fs::write(&path, before).unwrap();
             fs::write(&exec, before).unwrap();
-            let agent_state = AgentState::load(tmp.path().to_path_buf(), 10)
+            let agent_state = AgentState::open(tmp.path().to_path_buf(), 10)
                 .await
-                .expect("load");
+                .expect("open");
             for file in [&path, &exec] {
                 assert_eq!(
                     fs::read(file).unwrap(),
                     want,
-                    "{} after load, from {:?}",
+                    "{} after open, from {:?}",
                     file.display(),
                     String::from_utf8_lossy(before)
                 );
@@ -174,28 +199,28 @@ mod tests {
             assert_eq!(
                 agent_state.log().read().await.history_for_provider().len(),
                 entries,
-                "window entries after load, from {:?}",
+                "window entries after open, from {:?}",
                 String::from_utf8_lossy(before)
             );
         }
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let agent_state = AgentState::load(tmp.path().to_path_buf(), 10)
+        let agent_state = AgentState::open(tmp.path().to_path_buf(), 10)
             .await
-            .expect("load with no conversation.log");
+            .expect("open with no conversation.log");
         assert!(agent_state.log().read().await.is_empty());
         for name in ["conversation.log", "execution.json"] {
-            assert!(!tmp.path().join(name).exists(), "load creates no {name}");
+            assert!(!tmp.path().join(name).exists(), "open creates no {name}");
         }
     }
 
     // At startup every tool call in conversation.log with no end entry gets one
-    // restart entry, in call order, on disk by the time load returns. Here one
+    // restart entry, in call order, on disk by the time open returns. Here one
     // call finished, one was waiting for the user's approval and one was
-    // running when the harness died. A second load finds nothing open and adds
+    // running when the harness died. A second open finds nothing open and adds
     // nothing, so each call ends with exactly one entry.
     #[tokio::test]
-    async fn load_writes_one_restart_entry_per_open_call_and_none_on_a_second_load() {
+    async fn open_writes_one_restart_entry_per_open_call_and_none_on_a_second_open() {
         use crate::conversation::{parse_ndjson, AssistantAttribution, LogEntry};
         use proto_common::{content_text, text_block, Message, ToolCall};
 
@@ -248,7 +273,7 @@ mod tests {
             parse_ndjson(&std::fs::read_to_string(&conv).unwrap(), "conversation.log")
         };
 
-        let _first = AgentState::load(tmp.path().to_path_buf(), 10)
+        let _first = AgentState::open(tmp.path().to_path_buf(), 10)
             .await
             .unwrap();
         let entries = on_disk();
@@ -277,22 +302,73 @@ mod tests {
                     RESTART.to_string()
                 ),
             ],
-            "load must write one restart entry per open call, in call order, and nothing for \
+            "open must write one restart entry per open call, in call order, and nothing for \
              the finished call"
         );
 
-        let second = AgentState::load(tmp.path().to_path_buf(), 10)
+        let second = AgentState::open(tmp.path().to_path_buf(), 10)
             .await
             .unwrap();
         assert_eq!(
             on_disk().len(),
             5,
-            "a second load must find no open call and write nothing"
+            "a second open must find no open call and write nothing"
         );
         assert_eq!(
             second.log().read().await.history_for_provider().len(),
             5,
-            "the window after a second load holds each call's single end entry"
+            "the window after a second open holds each call's single end entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_note_names_the_alive_paths_or_none_only_in_a_non_empty_log_and_queues_nothing(
+    ) {
+        use crate::conversation::{parse_ndjson, LogEntry};
+        use crate::test_doubles::record;
+        use proto_common::content_text;
+
+        let empty = tempfile::TempDir::new().unwrap();
+        let state = AgentState::open(empty.path().to_path_buf(), 10)
+            .await
+            .unwrap();
+        state.note_restart(&["sub/0a1b2c3d".into()]).await.unwrap();
+        let window = state.log().read().await.history_for_provider().len();
+        assert_eq!(window, 0, "an empty log gets no note");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("conversation.log"), record("user", "hi")).unwrap();
+        let alive = ["sub/0a1b2c3d".to_string(), "two/12345678".to_string()];
+        let first = AgentState::open(tmp.path().to_path_buf(), 10)
+            .await
+            .unwrap();
+        first.note_restart(&alive).await.unwrap();
+        let second = AgentState::open(tmp.path().to_path_buf(), 10)
+            .await
+            .unwrap();
+        second.note_restart(&[]).await.unwrap();
+
+        let conv = std::fs::read_to_string(tmp.path().join("conversation.log")).unwrap();
+        let entries: Vec<(String, String)> = parse_ndjson::<LogEntry>(&conv, "conversation.log")
+            .iter()
+            .map(|e| (e.role.clone(), content_text(&e.content)))
+            .collect();
+        let entry = |text: &str| ("user".to_string(), text.to_string());
+        assert_eq!(
+            entries,
+            [
+                entry("hi"),
+                entry(
+                    "[agent restarted] Alive sub-agent dispatches: \
+                     sub/0a1b2c3d, two/12345678"
+                ),
+                entry("[agent restarted] Alive sub-agent dispatches: none"),
+            ],
+            "each start writes one note naming the alive paths, or none"
+        );
+        assert!(
+            second.queue().pop().await.is_none(),
+            "a note queues nothing"
         );
     }
 }

@@ -58,15 +58,15 @@ pub(crate) fn seed(router: ToolRouter, tools: Vec<ToolDecl>) -> ToolRouter {
     router
 }
 
-/// The agent state loaded over `root` (a compact keeps 10 archives). Loads
+/// The agent state opened over `root` (a compact keeps 10 archives). Opens
 /// on its own thread and runtime, so sync and async tests can both call it.
-pub(crate) fn load_agent_state(root: std::path::PathBuf) -> AgentState {
+pub(crate) fn open_agent_state(root: std::path::PathBuf) -> AgentState {
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(AgentState::load(root, 10))
+            .block_on(AgentState::open(root, 10))
             .unwrap()
     })
     .join()
@@ -76,7 +76,7 @@ pub(crate) fn load_agent_state(root: std::path::PathBuf) -> AgentState {
 /// The agent state over a fresh empty temp dir. The dir is leaked, like
 /// [`test_instructions`]'s.
 pub(crate) fn empty_agent_state() -> AgentState {
-    load_agent_state(tempfile::TempDir::new().unwrap().keep())
+    open_agent_state(tempfile::TempDir::new().unwrap().keep())
 }
 
 /// A conversation log over a fresh temp dir. The dir is leaked, like
@@ -390,7 +390,10 @@ pub(crate) fn in_process_dispatch(names: &[&str]) -> Arc<DispatchState> {
         "ns".to_string(),
         "capability-ag".to_string(),
         TEST_AG.to_string(),
-        TEST_AG,
+        &crate::config::Mode::Agent {
+            relay_gateway_addr: String::new(),
+            harness_image: String::new(),
+        },
         SchedulingConfig::default(),
         Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
     )

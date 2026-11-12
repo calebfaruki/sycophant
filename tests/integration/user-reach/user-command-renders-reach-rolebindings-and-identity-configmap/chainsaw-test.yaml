@@ -347,17 +347,16 @@ spec:
               ALPHA_UID=$(kubectl get role ag-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
               MISSING=delta
               # The installer's first attempt must fail before ag-delta
-              # appears. A failed attempt restarts the container in the same pod.
+              # appears. A failed attempt counts in the Job's status.failed.
               CMD_UID=$(kubectl get configmap "provision-user-$HASH" -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
               JOB="provision-user-$(printf '%s' "$CMD_UID" | tr -d - | cut -c1-10)"
-              RESTARTS=0
               for i in $(seq 1 180); do
-                RESTARTS=$(kubectl get pods -n sycophant-system -l "job-name=$JOB" \
-                  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || true)
-                [ "${RESTARTS:-0}" -ge 1 ] && break
+                FAILED=$(kubectl get job "$JOB" -n sycophant-system \
+                  -o jsonpath='{.status.failed}' 2>/dev/null || true)
+                [ "${FAILED:-0}" -ge 1 ] && break
                 sleep 1
               done
-              [ "${RESTARTS:-0}" -ge 1 ] || { echo "installer $JOB never refused missing ag-$MISSING"; exit 1; }
+              [ "${FAILED:-0}" -ge 1 ] || { echo "installer $JOB never refused missing ag-$MISSING"; exit 1; }
               # ag-delta appears while the installer still has retries left.
               helm template ag-delta "$REPO_ROOT/charts/sycophant-agent" \
                 --set name=delta -n "$TENANT_NS" \

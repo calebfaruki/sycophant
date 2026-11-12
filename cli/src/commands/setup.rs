@@ -46,7 +46,7 @@ fn extra_values(name: &str) -> Vec<String> {
         .map(|f| vec!["-f".to_string(), f])
         .unwrap_or_default()
 }
-const CILIUM_VERSION: &str = "1.19.3";
+const CILIUM_VERSION: &str = "1.19.10";
 const KYVERNO_VERSION: &str = "3.9.1";
 // Pinned gVisor release — the release tarball (gvisor.tar.bz2 + .sha512) is
 // verified present for aarch64 + x86_64. Bump deliberately by hand;

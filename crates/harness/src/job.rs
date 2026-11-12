@@ -2,10 +2,15 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Affinity, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, KeyToPath, PodAffinity,
-    PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, Probe, SecretVolumeSource,
-    TCPSocketAction, Volume, VolumeMount,
+    Affinity, ConfigMapEnvSource, ConfigMapProjection, ConfigMapVolumeSource, Container,
+    ContainerPort, DownwardAPIProjection, DownwardAPIVolumeFile, EmptyDirVolumeSource,
+    EnvFromSource, EnvVar, KeyToPath, ObjectFieldSelector, PersistentVolumeClaimVolumeSource,
+    PodAffinity, PodAffinityTerm, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
+    ProjectedVolumeSource, ResourceRequirements, SeccompProfile, SecretVolumeSource,
+    ServiceAccountTokenProjection, TCPSocketAction, Toleration, Volume, VolumeMount,
+    VolumeProjection,
 };
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
@@ -616,6 +621,238 @@ pub(crate) fn build_inference_job(
     }
 }
 
+/// The Job for sub-agent `sub_agent`'s harness at path `<sub_agent>/<id>`,
+/// started by `agent` with `mandate`. Admission stamps its labels and owner
+/// and checks every other part of it.
+pub(crate) fn build_dispatch_job(
+    agent: &str,
+    sub_agent: &str,
+    id: &str,
+    mandate: &str,
+    namespace: &str,
+    image: &str,
+) -> Job {
+    let host = format!("{sub_agent}-{id}");
+    let instructions_dir = format!("/etc/instructions/{sub_agent}");
+    let instructions_volume = format!("instructions-{sub_agent}");
+    let env_from = Some(vec![EnvFromSource {
+        config_map_ref: Some(ConfigMapEnvSource {
+            name: format!("ag-{sub_agent}-harness"),
+            optional: Some(false),
+        }),
+        ..Default::default()
+    }]);
+    let limits = |cpu: &str, memory: &str| {
+        Some(ResourceRequirements {
+            limits: Some(BTreeMap::from([
+                ("cpu".to_string(), Quantity(cpu.to_string())),
+                ("memory".to_string(), Quantity(memory.to_string())),
+            ])),
+            ..Default::default()
+        })
+    };
+    let mount = |name: &str, path: &str, read_only: bool| VolumeMount {
+        name: name.to_string(),
+        mount_path: path.to_string(),
+        read_only: read_only.then_some(true),
+        ..Default::default()
+    };
+    let (store_token, mut store_token_mount) =
+        shared::podspec::sa_token_volume("objectstore-token", "sycophant-objectstore");
+    store_token_mount.mount_path = "/var/run/secrets/objectstore".to_string();
+    let sync = Container {
+        name: "instructions-sync".to_string(),
+        image: Some(image.to_string()),
+        security_context: Some(hardened_security_context()),
+        resources: limits("250m", "128Mi"),
+        command: Some(vec!["/bin/rclone".to_string()]),
+        args: Some(vec![
+            "sync".to_string(),
+            "$(INSTRUCTIONS_SOURCE)".to_string(),
+            instructions_dir.clone(),
+        ]),
+        env_from: env_from.clone(),
+        volume_mounts: Some(vec![
+            mount(&instructions_volume, &instructions_dir, false),
+            mount("instructions-sync-scratch", "/tmp", false),
+            store_token_mount,
+        ]),
+        ..Default::default()
+    };
+    let env = |name: &str, value: &str| EnvVar {
+        name: name.to_string(),
+        value: Some(value.to_string()),
+        ..Default::default()
+    };
+    let harness = Container {
+        name: "harness".to_string(),
+        image: Some(image.to_string()),
+        security_context: Some(hardened_security_context()),
+        resources: limits("500m", "256Mi"),
+        env_from,
+        env: Some(vec![
+            env("DISPATCH_PATH", &format!("{sub_agent}/{id}")),
+            env("MANDATE", mandate),
+        ]),
+        ports: Some(vec![ContainerPort {
+            name: Some("dispatch".to_string()),
+            container_port: crate::DISPATCH_LINK_PORT as i32,
+            ..Default::default()
+        }]),
+        readiness_probe: Some(Probe {
+            tcp_socket: Some(TCPSocketAction {
+                port: IntOrString::Int(crate::DISPATCH_LINK_PORT as i32),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                sub_path: Some(format!("{sub_agent}/{id}")),
+                ..mount("conversation-data", crate::CONVERSATION_DIR, false)
+            },
+            mount(&instructions_volume, &instructions_dir, true),
+            mount("scheduling", "/etc/sycophant/scheduling", true),
+            mount(
+                "kube-api-token",
+                "/var/run/secrets/kubernetes.io/serviceaccount",
+                true,
+            ),
+        ]),
+        ..Default::default()
+    };
+    let empty_dir = |name: &str| Volume {
+        name: name.to_string(),
+        empty_dir: Some(EmptyDirVolumeSource::default()),
+        ..Default::default()
+    };
+    let volumes = vec![
+        Volume {
+            name: "conversation-data".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: format!("ag-{agent}-conversation"),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        empty_dir(&instructions_volume),
+        empty_dir("instructions-sync-scratch"),
+        store_token,
+        Volume {
+            name: "scheduling".to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: "toolset-scheduling".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        kube_api_token_volume(),
+    ];
+    Job {
+        metadata: ObjectMeta {
+            name: Some(host.clone()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(0),
+            ttl_seconds_after_finished: Some(30),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(BTreeMap::from([
+                        ("sycophant.md/agent".to_string(), agent.to_string()),
+                        ("sycophant.md/job-kind".to_string(), "dispatch".to_string()),
+                    ])),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    // The record `<sub>-<id>.ag-<agent>-dispatch.<ns>.svc.cluster.local`
+                    // the agent's harness attaches to.
+                    hostname: Some(host),
+                    subdomain: Some(format!("ag-{agent}-dispatch")),
+                    restart_policy: Some("Never".to_string()),
+                    service_account_name: Some(format!("ag-{sub_agent}")),
+                    automount_service_account_token: Some(false),
+                    termination_grace_period_seconds: Some(5),
+                    security_context: Some(PodSecurityContext {
+                        run_as_non_root: Some(true),
+                        run_as_user: Some(1000),
+                        run_as_group: Some(1000),
+                        fs_group: Some(1000),
+                        seccomp_profile: Some(SeccompProfile {
+                            type_: "RuntimeDefault".to_string(),
+                            localhost_profile: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    tolerations: Some(vec![Toleration {
+                        key: Some("sycophant.md/workload".to_string()),
+                        operator: Some("Equal".to_string()),
+                        value: Some("agent".to_string()),
+                        effect: Some("NoSchedule".to_string()),
+                        ..Default::default()
+                    }]),
+                    affinity: Some(agent_affinity(agent)),
+                    init_containers: Some(vec![sync]),
+                    containers: vec![harness],
+                    volumes: Some(volumes),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The `kube-api-token` volume of harness.yaml, in the exact shape the pod
+/// VAP pins: the apiserver token, the cluster CA and the namespace.
+fn kube_api_token_volume() -> Volume {
+    let item = |key: &str| KeyToPath {
+        key: key.to_string(),
+        path: key.to_string(),
+        ..Default::default()
+    };
+    Volume {
+        name: "kube-api-token".to_string(),
+        projected: Some(ProjectedVolumeSource {
+            default_mode: Some(420),
+            sources: Some(vec![
+                VolumeProjection {
+                    service_account_token: Some(ServiceAccountTokenProjection {
+                        path: "token".to_string(),
+                        audience: None,
+                        expiration_seconds: Some(3600),
+                    }),
+                    ..Default::default()
+                },
+                VolumeProjection {
+                    config_map: Some(ConfigMapProjection {
+                        name: "kube-root-ca.crt".to_string(),
+                        items: Some(vec![item("ca.crt")]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                VolumeProjection {
+                    downward_api: Some(DownwardAPIProjection {
+                        items: Some(vec![DownwardAPIVolumeFile {
+                            path: "namespace".to_string(),
+                            field_ref: Some(ObjectFieldSelector {
+                                field_path: "metadata.namespace".to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }]),
+                    }),
+                    ..Default::default()
+                },
+            ]),
+        }),
+        ..Default::default()
+    }
+}
+
 /// Create a tool Job in `namespace`. The harness's Role grants `create` on
 /// `batch/jobs` and nothing else; the Job is reaped by its own
 /// `ttlSecondsAfterFinished`, never deleted by the harness.
@@ -629,7 +866,7 @@ pub(crate) async fn create_job(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const TEST_CALL_ID: &str = "abcdef12-0000-0000-0000-000000000000";
@@ -741,7 +978,7 @@ mod tests {
         )
     }
 
-    fn container_env<'a>(job: &'a Job, name: &str) -> Option<&'a str> {
+    pub(crate) fn container_env<'a>(job: &'a Job, name: &str) -> Option<&'a str> {
         pod_spec(job).containers[0]
             .env
             .as_ref()
@@ -1023,5 +1260,89 @@ mod tests {
         );
         assert_eq!(container_env(&job, "TOOLSET_CREDENTIAL_MAP"), None);
         assert_eq!(container_env(&job, "TOOLSET_SCRUB_SECRETS"), None);
+    }
+
+    /// Agent `one` starts sub-agent `sub` at path `sub/0a1b2c3d`.
+    fn sub_agent_job() -> Job {
+        build_dispatch_job(
+            "one",
+            "sub",
+            "0a1b2c3d",
+            "summarize the repo",
+            "tenant-a",
+            "sycophant-harness:local",
+        )
+    }
+
+    fn all_containers(spec: &PodSpec) -> impl Iterator<Item = &Container> {
+        spec.init_containers
+            .iter()
+            .flatten()
+            .chain(&spec.containers)
+    }
+
+    #[test]
+    fn sub_agent_job_never_retries_and_has_no_deadline() {
+        let job = sub_agent_job();
+        let spec = job.spec.as_ref().expect("the Job has a spec");
+        let restart = pod_spec(&job).restart_policy.as_deref();
+        assert_eq!(
+            (spec.backoff_limit, restart, spec.active_deadline_seconds),
+            (Some(0), Some("Never"), None),
+            "want backoffLimit 0, restartPolicy Never and no deadline"
+        );
+    }
+
+    #[test]
+    fn sub_agent_job_mounts_the_conversation_volume_only_at_its_own_folder() {
+        let job = sub_agent_job();
+        let spec = pod_spec(&job);
+        let claimed: Vec<&str> = spec
+            .volumes
+            .iter()
+            .flatten()
+            .filter(|v| {
+                v.persistent_volume_claim
+                    .as_ref()
+                    .map(|c| c.claim_name.as_str())
+                    == Some("ag-one-conversation")
+            })
+            .map(|v| v.name.as_str())
+            .collect();
+        let mounts: Vec<(&str, Option<&str>)> = all_containers(spec)
+            .flat_map(|c| c.volume_mounts.iter().flatten())
+            .filter(|m| claimed.contains(&m.name.as_str()))
+            .map(|m| (m.mount_path.as_str(), m.sub_path.as_deref()))
+            .collect();
+        assert_eq!(
+            mounts,
+            [("/var/lib/harness/conversations", Some("sub/0a1b2c3d"))],
+            "the conversation claim is mounted once, at the sub-agent's folder"
+        );
+    }
+
+    #[test]
+    fn sub_agent_job_carries_no_relay_env_or_token() {
+        let job = sub_agent_job();
+        let spec = pod_spec(&job);
+        let relay_env: Vec<&str> = all_containers(spec)
+            .flat_map(|c| c.env.iter().flatten())
+            .map(|e| e.name.as_str())
+            .filter(|n| n.starts_with("RELAY"))
+            .collect();
+        let audiences: Vec<&str> = spec
+            .volumes
+            .iter()
+            .flatten()
+            .filter_map(|v| v.projected.as_ref())
+            .flat_map(|p| p.sources.iter().flatten())
+            .filter_map(|s| s.service_account_token.as_ref())
+            .filter_map(|t| t.audience.as_deref())
+            .collect();
+        assert!(relay_env.is_empty(), "relay env {relay_env:?}");
+        assert!(
+            !audiences.contains(&shared::auth::HARNESS_RELAY_AUDIENCE),
+            "a relay token in {audiences:?}"
+        );
     }
 }

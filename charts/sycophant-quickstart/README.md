@@ -18,9 +18,9 @@ Per-tenant charts are not bundled. Each tenant's components are provisioned sepa
 Cilium, Kyverno and the `kyverno-crds` chart are not bundled. `sycoadm setup`
 installs all three. On your own cluster, you install:
 
-- **Cilium 1.19.x in `kube-system`** with the L7 DNS proxy enabled, kube-proxy
-  replacement disabled, and a pod CIDR matching the cluster's pod range.
-  Toolset egress allowlists depend on CiliumNetworkPolicy, so Calico or
+- **Cilium 1.19.7 or later in `kube-system`** with the L7 DNS proxy enabled,
+  kube-proxy replacement disabled, and a pod CIDR matching the cluster's pod
+  range. Toolset egress allowlists depend on CiliumNetworkPolicy, so Calico or
   Flannel cannot replace it.
 - **The `kyverno-crds` chart as its own Helm release, before Kyverno.** Kyverno
   does not come Ready without its CRDs. The chart lives at `charts/kyverno-crds/`.

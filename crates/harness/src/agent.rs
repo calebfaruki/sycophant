@@ -528,6 +528,8 @@ mod tests {
             .expect("continuation carries the tool result");
         assert_eq!(tool_result.role, "tool");
         assert_eq!(tool_result.is_error, Some(true));
+        let text = proto_common::content_text(&tool_result.content);
+        assert_eq!(text, "tool call error: toolset down");
     }
 
     /// EndTurn ends the loop after one model call.

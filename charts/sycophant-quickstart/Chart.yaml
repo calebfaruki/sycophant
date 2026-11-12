@@ -3,8 +3,8 @@ name: sycophant-quickstart
 description: |
   Sycophant cluster-scoped install bundle: the gVisor RuntimeClass and the
   sycophant-cluster chart. Prerequisites the operator must install themselves:
-  Cilium 1.19.x in kube-system, the kyverno-crds chart, and Kyverno 3.9.x in a
-  dedicated `kyverno` namespace labelled
+  Cilium 1.19.7 or later in kube-system, the kyverno-crds chart, and Kyverno
+  3.9.x in a dedicated `kyverno` namespace labelled
   `pod-security.kubernetes.io/enforce=restricted`.
 type: application
 version: 0.1.0
