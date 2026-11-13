@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::clients::{RelayRpc, ServerRequestOutcome};
 use crate::runtime_tools::DispatchAbort;
 
-const METHOD: &str = "RequestToolApproval";
+pub(crate) const METHOD: &str = "RequestToolApproval";
 
 const TIMEOUT_SECONDS: u32 = 300;
 

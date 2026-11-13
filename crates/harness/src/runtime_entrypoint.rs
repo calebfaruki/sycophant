@@ -176,6 +176,7 @@ pub(crate) async fn message_loop(
                         idle_gap,
                         cancel: cancel.clone(),
                         message_id: message_id.clone(),
+                        inbox: agent_state.inbox().clone(),
                     },
                     sink,
                 )

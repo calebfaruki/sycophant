@@ -124,7 +124,6 @@ spec:
             - --reasoning
             - {{ index $m "server.thinking" | quote }}
             {{- end }}
-            - --no-kv-unified
             - --sse-ping-interval
             - "30"
             - --no-context-shift

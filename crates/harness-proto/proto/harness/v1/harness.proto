@@ -80,5 +80,9 @@ message ParentFrame {
   oneof frame {
     sycophant.common.v1.SendServerRequestAndAwaitResponse response = 1;
     bool answer_taken = 2;
+    // A message for the sub-agent's running turn.
+    string message = 3;
+    // End the sub-agent's harness.
+    bool stop = 4;
   }
 }

@@ -23,6 +23,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::clients::{RelayRpc, ServerRequestOutcome};
 use crate::message_source::{InboundMessage, MessageSource};
+use crate::queue::Inbox;
 
 const ATTACH_DROPPED: &str = "the parent's attach dropped";
 
@@ -43,6 +44,8 @@ struct Link {
     /// once that stream ends.
     attached: watch::Sender<Option<Weak<Attach>>>,
     taken: watch::Sender<bool>,
+    stopped: watch::Sender<bool>,
+    inbox: Inbox,
 }
 
 /// The dispatch's `RelayRpc`: a link to the attached parent agent's harness.
@@ -54,10 +57,12 @@ pub(crate) struct ParentLink {
 impl ParentLink {
     /// `parent` is the only agent whose harness may attach, and only from
     /// `namespace`. `verifier` returns the caller's TokenReview username.
+    /// A `message` frame lands in `inbox`.
     pub(crate) fn new(
         parent: impl Into<String>,
         namespace: impl Into<String>,
         verifier: Arc<dyn TokenVerifier>,
+        inbox: Inbox,
     ) -> Self {
         Self {
             link: Arc::new(Link {
@@ -67,6 +72,8 @@ impl ParentLink {
                 answer: watch::channel(None).0,
                 attached: watch::channel(None).0,
                 taken: watch::channel(false).0,
+                stopped: watch::channel(false).0,
+                inbox,
             }),
         }
     }
@@ -74,6 +81,11 @@ impl ParentLink {
     /// Resolves once the parent sends `answer_taken`.
     pub(crate) async fn answer_taken(&self) {
         let _ = self.link.taken.subscribe().wait_for(|taken| *taken).await;
+    }
+
+    /// Resolves once the parent sends `stop`.
+    pub(crate) async fn stopped(&self) {
+        let _ = self.link.stopped.subscribe().wait_for(|s| *s).await;
     }
 }
 
@@ -191,6 +203,10 @@ impl DispatchLink for ParentLink {
                     }
                     Some(parent_frame::Frame::AnswerTaken(true)) => {
                         link.taken.send_replace(true);
+                    }
+                    Some(parent_frame::Frame::Message(text)) => link.inbox.push(text),
+                    Some(parent_frame::Frame::Stop(true)) => {
+                        link.stopped.send_replace(true);
                     }
                     _ => {}
                 }

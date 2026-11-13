@@ -138,6 +138,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 parent.clone(),
                 config.namespace.clone(),
                 Arc::new(dispatch_verifier(client)),
+                agent_state.inbox().clone(),
             );
             let seam = tool_router::relay_seam(link.clone());
             (None, Some(link), seam)
@@ -314,10 +315,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             agent_state,
             &mut source,
         );
-        // The dispatch ends once the parent has taken its final answer.
+        // The sub-agent exits once the parent has taken its final answer, or
+        // stops it.
         tokio::select! {
             res = turns => res?,
             () = link.answer_taken() => tracing::info!("final answer taken"),
+            () = link.stopped() => tracing::info!("stopped by the parent"),
         }
         return Ok(());
     }

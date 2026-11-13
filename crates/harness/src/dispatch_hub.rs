@@ -2,6 +2,7 @@
 //! Job, attach to it, carry its approval requests to the agent's relay and
 //! queue its final answer.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -23,6 +24,7 @@ use tonic::Streaming;
 
 use crate::agent_state::AgentState;
 use crate::clients::ServerRequestOutcome;
+use crate::conversation::{ConversationLog, EntrySnapshot, LocalFsStore};
 use crate::job::build_dispatch_job;
 use crate::message_source::InboundMessage;
 use crate::tool_router::RelaySeam;
@@ -47,6 +49,13 @@ const ATTACH_BACKOFF: Duration = Duration::from_secs(1);
 /// relay cannot be reached.
 const INTERNAL_ERROR: i32 = -32603;
 
+/// The requests a sub-agent may send through the agent's relay.
+const ALLOWED_METHODS: [&str; 3] = [
+    crate::tool_approval::METHOD,
+    crate::channel_stream_tools::REQUEST_USER_INPUT,
+    crate::channel_stream_tools::REQUEST_USER_AUTH,
+];
+
 pub(crate) struct HubConfig {
     pub(crate) agent: String,
     pub(crate) namespace: String,
@@ -66,6 +75,8 @@ pub(crate) struct DispatchHub {
     list: ListSeam,
     relay: RelaySeam,
     agent_state: Arc<AgentState>,
+    /// Each open attach's sender, by path, until its final answer.
+    attached: std::sync::Mutex<HashMap<String, mpsc::Sender<ParentFrame>>>,
 }
 
 /// One open attach: the frames sent to the sub-agent's harness and the ones it
@@ -86,6 +97,7 @@ impl DispatchHub {
             list,
             relay,
             agent_state,
+            attached: Default::default(),
         }
     }
 
@@ -180,12 +192,17 @@ impl DispatchHub {
     /// Carry the sub-agent's requests to the agent's relay until its final
     /// answer comes. Queue the answer under `path`, then say it is taken.
     async fn serve(&self, path: &str, (tx, mut frames): Attached) {
+        self.attached
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), tx.clone());
         while let Ok(Some(frame)) = frames.message().await {
             let reply = match frame.frame {
                 Some(dispatch_frame::Frame::Request(request)) => {
                     parent_frame::Frame::Response(self.ask(path, request).await)
                 }
                 Some(dispatch_frame::Frame::FinalAnswer(text)) => {
+                    self.attached.lock().unwrap().remove(path);
                     self.agent_state
                         .queue()
                         .push(InboundMessage {
@@ -210,16 +227,23 @@ impl DispatchHub {
                 return;
             }
         }
+        self.attached.lock().unwrap().remove(path);
         tracing::warn!(path = %path, "attach closed before the final answer");
     }
 
     /// Send one of the sub-agent's requests through the agent's relay, under
-    /// the sub-agent's own path, and return the outcome unchanged.
+    /// the sub-agent's own path, and return the outcome unchanged. Only an
+    /// approval and the two requests to the user are sent.
     async fn ask(
         &self,
         path: &str,
         request: SendServerRequestAndAwaitRequest,
     ) -> SendServerRequestAndAwaitResponse {
+        let mut response = SendServerRequestAndAwaitResponse::default();
+        if !ALLOWED_METHODS.contains(&request.method.as_str()) {
+            response.unsupported_method = true;
+            return response;
+        }
         let mut params: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(&request.params_json).unwrap_or_default();
         params.insert("dispatch".into(), path.into());
@@ -232,7 +256,6 @@ impl DispatchHub {
                 request.timeout_seconds,
             )
             .await;
-        let mut response = SendServerRequestAndAwaitResponse::default();
         match outcome {
             Ok(ServerRequestOutcome::Result(json)) => response.result_json = json,
             Ok(ServerRequestOutcome::Error { code, message }) => {
@@ -251,6 +274,58 @@ impl DispatchHub {
             }
         }
         response
+    }
+
+    /// Send `text` to the sub-agent at `path` over its attach.
+    pub(crate) async fn message(&self, path: &str, text: &str) -> Result<(), String> {
+        self.send(path, parent_frame::Frame::Message(text.to_string()))
+            .await
+    }
+
+    /// Stop the sub-agent at `path` over its attach.
+    pub(crate) async fn stop(&self, path: &str) -> Result<(), String> {
+        self.send(path, parent_frame::Frame::Stop(true)).await
+    }
+
+    async fn send(&self, path: &str, frame: parent_frame::Frame) -> Result<(), String> {
+        let tx = self.attached.lock().unwrap().get(path).cloned();
+        let frame = ParentFrame { frame: Some(frame) };
+        match tx {
+            Some(tx) if tx.send(frame).await.is_ok() => Ok(()),
+            _ => Err(format!("no live sub-agent at {path}")),
+        }
+    }
+
+    /// The paths of the sub-agents' harnesses that are ready.
+    pub(crate) async fn list(&self) -> Result<Vec<String>, String> {
+        (self.list)().await
+    }
+
+    /// The entries of the `conversation.log` in the sub-agent folder at
+    /// `path`, `<sub-agent>/<id>`. Only reads.
+    pub(crate) async fn read_log(&self, path: &str) -> Result<Vec<EntrySnapshot>, String> {
+        let valid = path.split_once('/').is_some_and(|(sub, id)| {
+            let label = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+            let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+            (1..=63).contains(&sub.len())
+                && sub.bytes().all(|b| label(b) || b == b'-')
+                && sub.bytes().next().is_some_and(label)
+                && sub.bytes().last().is_some_and(label)
+                && id.len() == 8
+                && id.bytes().all(hex)
+        });
+        if !valid {
+            return Err(format!("not a sub-agent path: {path}"));
+        }
+        let folder = self.config.root.join(path);
+        if !tokio::fs::metadata(&folder).await.is_ok_and(|m| m.is_dir()) {
+            return Err(format!("no sub-agent at {path}"));
+        }
+        let store = Arc::new(LocalFsStore::new(folder, 0));
+        Ok(ConversationLog::rebuild(store)
+            .await?
+            .snapshot(None)
+            .entries)
     }
 }
 
@@ -316,6 +391,7 @@ pub(crate) mod test_support {
 
     use super::*;
     use crate::dispatch_link::ParentLink;
+    use crate::queue::Inbox;
     use crate::test_doubles::{empty_agent_state, ScriptedRelay};
     use crate::tool_router::relay_seam;
 
@@ -340,7 +416,33 @@ pub(crate) mod test_support {
 
     /// The sub-agent's side, admitting only agent `one`'s harness.
     pub(crate) fn sub_agent_link() -> ParentLink {
-        ParentLink::new(AGENT, NAMESPACE, Arc::new(UserTokens))
+        sub_agent_link_with(Inbox::default())
+    }
+
+    /// [`sub_agent_link`], its messages landing in `inbox`.
+    pub(crate) fn sub_agent_link_with(inbox: Inbox) -> ParentLink {
+        ParentLink::new(AGENT, NAMESPACE, Arc::new(UserTokens), inbox)
+    }
+
+    /// What lands in `inbox` within 5s: empty if nothing does.
+    pub(crate) async fn landed(inbox: &Inbox) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let items = inbox.drain();
+            if !items.is_empty() || Instant::now() >= deadline {
+                return items;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Wait until the hub's attach to `path` is open.
+    pub(crate) async fn attached(h: &TestHub, path: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.hub.attached.lock().unwrap().contains_key(path) {
+            assert!(Instant::now() < deadline, "the hub never attached {path}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Serve `link` on an ephemeral port and return its URI.
@@ -413,13 +515,16 @@ pub(crate) mod test_support {
     }
 
     /// Agent `one`'s hub. Admission admits only sub-agent `sub`'s Jobs,
-    /// which are recorded. `listed` is what a restart finds ready.
+    /// which are recorded. `listed` is what a restart finds ready. The
+    /// volume root sits in a folder of its own, so a path that climbs out of
+    /// it reaches only this test's files.
     pub(crate) fn test_hub(
         endpoint: EndpointSeam,
         relay: ScriptedRelay,
         listed: Vec<String>,
     ) -> TestHub {
-        let root = tempfile::TempDir::new().unwrap().keep();
+        let root = tempfile::TempDir::new().unwrap().keep().join("vol");
+        std::fs::create_dir(&root).unwrap();
         let token_path = root.join("token");
         std::fs::write(&token_path, PARENT_TOKEN).unwrap();
         let jobs = Arc::new(Mutex::new(Vec::new()));
@@ -496,6 +601,7 @@ mod tests {
     use super::test_support::*;
     use crate::clients::{RelayRpc, ServerRequestOutcome};
     use crate::message_source::InboundMessage;
+    use crate::queue::Inbox;
     use crate::test_doubles::{RelayAnswer, ScriptedRelay};
 
     const PATH: &str = "sub/0a1b2c3d";
@@ -626,5 +732,64 @@ mod tests {
             "a new request goes to the new attach, got {outcome:?}"
         );
         assert_eq!(relay.requests_for(APPROVAL).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_agents_turn_leaves_its_sub_agents_attached() {
+        let inbox = Inbox::default();
+        let link = sub_agent_link_with(inbox.clone());
+        let uris = endpoints(vec![(PATH, serve(link.clone()))], silent_endpoint());
+        let h = test_hub(uris, ScriptedRelay::default(), vec![]);
+        h.hub.attach(PATH.into());
+        attached(&h, PATH).await;
+        h.hub.message(PATH, "before").await.unwrap();
+        assert_eq!(landed(&inbox).await, ["before"]);
+
+        let _turn = h.agent_state.register_turn();
+        assert!(h.agent_state.cancel(), "the agent's turn is cancelled");
+
+        let after = h.hub.message(PATH, "after").await;
+        assert_eq!(after, Ok(()), "the attach is still open");
+        assert_eq!(
+            landed(&inbox).await,
+            ["after"],
+            "the cancel sent the sub-agent no message"
+        );
+        let stopped = timeout(Duration::from_millis(200), link.stopped()).await;
+        assert!(stopped.is_err(), "the cancel did not stop the sub-agent");
+    }
+
+    #[tokio::test]
+    async fn the_hub_forwards_only_allow_listed_requests() {
+        let link = sub_agent_link();
+        let uris = endpoints(vec![(PATH, serve(link.clone()))], silent_endpoint());
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()]);
+        let h = test_hub(uris, relay.clone(), vec![]);
+        let turn = h.agent_state.register_turn();
+        h.hub.attach(PATH.into());
+
+        let mut ask = link.clone();
+        let mut outcomes = Vec::new();
+        for method in ["CancelTurn", "RequestUserInput"] {
+            let call = ask.send_server_request_and_await("c1", method, "{}", 0);
+            let outcome = timeout(Duration::from_secs(5), call).await;
+            outcomes.push(outcome.expect("the request is answered within 5s"));
+        }
+
+        assert!(
+            matches!(outcomes[0], Ok(ServerRequestOutcome::UnsupportedMethod)),
+            "CancelTurn gets unsupported_method, got {:?}",
+            outcomes[0]
+        );
+        assert!(
+            relay.requests_for("CancelTurn").is_empty(),
+            "CancelTurn never reaches the relay"
+        );
+        assert!(!turn.is_cancelled(), "the agent's turn runs on");
+        assert_eq!(
+            relay.requests_for("RequestUserInput").len(),
+            1,
+            "RequestUserInput still reaches the relay"
+        );
     }
 }

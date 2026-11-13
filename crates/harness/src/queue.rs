@@ -45,6 +45,22 @@ impl MessageQueue {
     }
 }
 
+/// A sub-agent's messages from its agent or a person, folded into its turn
+/// before its next model request.
+#[derive(Clone, Default)]
+pub(crate) struct Inbox(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Inbox {
+    pub(crate) fn push(&self, message: String) {
+        self.0.lock().unwrap().push(message);
+    }
+
+    /// Take every message, oldest first.
+    pub(crate) fn drain(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

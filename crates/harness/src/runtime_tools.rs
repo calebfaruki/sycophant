@@ -1,5 +1,5 @@
 //! Harness-local runtime tools: `ReadInstructions`, `ListInstructions`,
-//! `Think` and `ReadArchive`.
+//! `Think`, `ReadArchive` and the sub-agent tools.
 //!
 //! These are framework-defined tools the LLM can call. The harness advertises
 //! them alongside the toolset-served tools and dispatches them in-process.
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::agent_state::AgentState;
-use crate::conversation::{tool_turn_as_text, ConversationLog};
+use crate::conversation::{tool_turn_as_text, ConversationLog, EntrySnapshot};
 use crate::dispatch_hub::DispatchHub;
 use crate::instructions::{page, slice_lines, strip_frontmatter, Instructions, InstructionsError};
 
@@ -20,6 +20,18 @@ const LIST_INSTRUCTIONS_TOOL_NAME: &str = "ListInstructions";
 const THINK_TOOL_NAME: &str = "Think";
 const READ_ARCHIVE_TOOL_NAME: &str = "ReadArchive";
 pub(crate) const START_SUB_AGENT_TOOL_NAME: &str = "StartSubAgent";
+const LIST_SUB_AGENTS_TOOL_NAME: &str = "ListSubAgents";
+const READ_SUB_AGENT_LOG_TOOL_NAME: &str = "ReadSubAgentLog";
+pub(crate) const MESSAGE_SUB_AGENT_TOOL_NAME: &str = "MessageSubAgent";
+pub(crate) const STOP_SUB_AGENT_TOOL_NAME: &str = "StopSubAgent";
+/// The tools a harness offers only with its sub-agents' hub.
+pub(crate) const SUB_AGENT_TOOLS: [&str; 5] = [
+    START_SUB_AGENT_TOOL_NAME,
+    LIST_SUB_AGENTS_TOOL_NAME,
+    READ_SUB_AGENT_LOG_TOOL_NAME,
+    MESSAGE_SUB_AGENT_TOOL_NAME,
+    STOP_SUB_AGENT_TOOL_NAME,
+];
 
 /// Cap on the paths `ListInstructions` returns and the primary prompt's tree map
 /// lists.
@@ -132,18 +144,31 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     ]
 }
 
-/// `StartSubAgent`, offered only by a harness that is not a sub-agent's own.
-pub(crate) fn start_sub_agent_definition() -> ToolInfo {
-    ToolInfo {
-        toolset: String::new(),
-        name: START_SUB_AGENT_TOOL_NAME.into(),
-        description: "Start one of this agent's sub-agents on a mandate. Returns its path, \
-                      `<sub_agent>/<id>`, at once. Its final answer arrives later as a \
-                      message from that path."
-            .into(),
-        parameters_json: serde_json::json!({
-            "type": "object",
-            "properties": {
+/// The sub-agent tools, offered only by a harness that is not a sub-agent's
+/// own.
+pub(crate) fn sub_agent_definitions() -> Vec<ToolInfo> {
+    let def = |name: &str, description: &str, properties: serde_json::Value, required: &[&str]| {
+        ToolInfo {
+            toolset: String::new(),
+            name: name.into(),
+            description: description.into(),
+            parameters_json: serde_json::json!({
+                "type": "object", "properties": properties, "required": required
+            })
+            .to_string(),
+        }
+    };
+    let path = serde_json::json!({
+        "type": "string",
+        "description": "The sub-agent's path, `<sub_agent>/<id>`."
+    });
+    vec![
+        def(
+            START_SUB_AGENT_TOOL_NAME,
+            "Start one of this agent's sub-agents on a mandate. Returns its path, \
+             `<sub_agent>/<id>`, at once. Its final answer arrives later as a \
+             message from that path.",
+            serde_json::json!({
                 "sub_agent": {
                     "type": "string",
                     "description": "Name of the sub-agent to start."
@@ -152,17 +177,60 @@ pub(crate) fn start_sub_agent_definition() -> ToolInfo {
                     "type": "string",
                     "description": "The task the sub-agent works on alone."
                 }
-            },
-            "required": ["sub_agent", "mandate"]
-        })
-        .to_string(),
-    }
+            }),
+            &["sub_agent", "mandate"],
+        ),
+        def(
+            LIST_SUB_AGENTS_TOOL_NAME,
+            "List the paths of this agent's running sub-agents, as a JSON array.",
+            serde_json::json!({}),
+            &[],
+        ),
+        def(
+            READ_SUB_AGENT_LOG_TOOL_NAME,
+            "Read a sub-agent's conversation, running or ended. Returns its entries \
+             oldest-to-newest. Optional 1-based `offset`/`limit` return only that \
+             window of entries.",
+            serde_json::json!({
+                "path": path,
+                "offset": { "type": "integer", "description": "1-based first entry to return." },
+                "limit": { "type": "integer", "description": "Max number of entries to return." }
+            }),
+            &["path"],
+        ),
+        def(
+            MESSAGE_SUB_AGENT_TOOL_NAME,
+            "Send a running sub-agent a message. It reads it before its next model request.",
+            serde_json::json!({
+                "path": path,
+                "message": { "type": "string", "description": "The message." }
+            }),
+            &["path", "message"],
+        ),
+        def(
+            STOP_SUB_AGENT_TOOL_NAME,
+            "Stop a running sub-agent. It sends no final answer.",
+            serde_json::json!({ "path": path }),
+            &["path"],
+        ),
+    ]
 }
 
 #[derive(Deserialize)]
 struct StartSubAgentArgs {
     sub_agent: String,
     mandate: String,
+}
+
+#[derive(Deserialize)]
+struct PathArgs {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct MessageArgs {
+    path: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -250,25 +318,52 @@ fn dispatch_read(
 }
 
 /// `StartSubAgent(sub_agent, mandate)`: the new sub-agent's path, or the
-/// error that kept it from starting.
-pub(crate) async fn dispatch_start_sub_agent(
+/// error that kept it from starting. The other sub-agent tools take a path,
+/// `<sub_agent>/<id>`.
+pub(crate) async fn dispatch_sub_agent_tool(
+    name: &str,
     input_json: &str,
     hub: &std::sync::Arc<DispatchHub>,
 ) -> CallToolResponse {
-    let started = match serde_json::from_str::<StartSubAgentArgs>(input_json) {
-        Ok(args) => hub.start(&args.sub_agent, &args.mandate).await,
-        Err(e) => Err(format!("invalid arguments: {e}")),
-    };
-    match started {
-        Ok(path) => CallToolResponse {
-            content: vec![text_block(path)],
+    let done: Result<String, String> = async {
+        match name {
+            START_SUB_AGENT_TOOL_NAME => {
+                let a: StartSubAgentArgs = args(input_json)?;
+                hub.start(&a.sub_agent, &a.mandate).await
+            }
+            LIST_SUB_AGENTS_TOOL_NAME => Ok(serde_json::json!(hub.list().await?).to_string()),
+            READ_SUB_AGENT_LOG_TOOL_NAME => {
+                let a: ReadArgs = args(input_json)?;
+                entries_json(hub.read_log(&a.path).await?, a.offset, a.limit)
+            }
+            MESSAGE_SUB_AGENT_TOOL_NAME => {
+                let a: MessageArgs = args(input_json)?;
+                hub.message(&a.path, &a.message)
+                    .await
+                    .map(|()| "sent".into())
+            }
+            STOP_SUB_AGENT_TOOL_NAME => {
+                let a: PathArgs = args(input_json)?;
+                hub.stop(&a.path).await.map(|()| "stopped".into())
+            }
+            other => Err(format!("unknown sub-agent tool: {other}")),
+        }
+    }
+    .await;
+    match done {
+        Ok(text) => CallToolResponse {
+            content: vec![text_block(text)],
             is_error: false,
         },
         Err(e) => CallToolResponse {
-            content: vec![text_block(format!("StartSubAgent error: {e}"))],
+            content: vec![text_block(format!("{name} error: {e}"))],
             is_error: true,
         },
     }
+}
+
+fn args<T: serde::de::DeserializeOwned>(input_json: &str) -> Result<T, String> {
+    serde_json::from_str(input_json).map_err(|e| format!("invalid arguments: {e}"))
 }
 
 /// `ListInstructions()`: the agent tree's flat sorted file paths, capped.
@@ -306,7 +401,20 @@ async fn dispatch_read_archive(
         Ok(None) => return error(format!("ReadArchive error: no archive {n}")),
         Err(e) => return error(format!("ReadArchive error: archive {n} {e}")),
     };
-    let entries: Vec<EntryJson> = page(entries, args.offset, args.limit)
+    let output = entries_json(entries, args.offset, args.limit)?;
+    Ok(CallToolResponse {
+        content: vec![text_block(output)],
+        is_error: false,
+    })
+}
+
+/// `entries`, paged by [`page`], as a JSON array of text entries.
+fn entries_json(
+    entries: Vec<EntrySnapshot>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, String> {
+    let entries: Vec<EntryJson> = page(entries, offset, limit)
         .into_iter()
         .map(|e| EntryJson {
             seq: e.seq,
@@ -316,12 +424,7 @@ async fn dispatch_read_archive(
             text: content_text(&tool_turn_as_text(e.message).content),
         })
         .collect();
-    let output = serde_json::to_string(&entries)
-        .map_err(|e| format!("serialize ReadArchive output: {e}"))?;
-    Ok(CallToolResponse {
-        content: vec![text_block(output)],
-        is_error: false,
-    })
+    serde_json::to_string(&entries).map_err(|e| format!("serialize entries: {e}"))
 }
 
 fn dispatch_think(input_json: &str) -> CallToolResponse {

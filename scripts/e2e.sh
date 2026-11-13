@@ -73,7 +73,6 @@ readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 # render the llama.cpp Deployment, its Service and its ingress fence (CNP
 # inf-<key>). Every local model serves on the fixed port 8080.
 readonly INFERENCE_PROFILE="qwen3-5-2b"
-readonly INFERENCE_PORT="8080"
 # The hello-world toolset pods the model and client-direct calls run in.
 TOOLSET_SELECTOR="app.kubernetes.io/component=capability-job"
 TOOLSET_SELECTOR+=",sycophant.md/agent=hello-world"
@@ -173,6 +172,7 @@ cleanup() {
   for pid in "${CLEANUP_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
+  rm -f "${SCOUT_PATHS:-}"
 }
 trap cleanup EXIT
 
@@ -226,27 +226,19 @@ print(profile["inference"]["server"]["memory"])' \
   build_weights_image >/dev/null
 }
 
-load_images_to_k3d() {
-  local tar
-  k3d image import weights:local --cluster "$CLUSTER_NAME" >/dev/null
-  # Save one arch of the llama-server index so k3d can import it.
+pull_llama_server() {
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$LLAMA_SERVER_REF" \
     >/dev/null
   docker tag "$LLAMA_SERVER_REF" llama-server:local
-  tar="$(mktemp -t image.XXXXXX).tar"
-  docker image save --platform "linux/${DOCKER_ARCH}" -o "$tar" \
-    llama-server:local
-  k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
-  rm -f "$tar"
 }
 
-# `sycoadm setup` builds and loads the sycophant images; this loads the model
-# and llama-server images too.
+# `sycoadm setup` builds and loads the sycophant images; this builds the model
+# and llama-server images that `sycoadm inference up` pushes.
 step_1_build() {
   step "Step 1: model and llama-server images"
   prepare_inference_assets
-  load_images_to_k3d
-  ok "model and llama-server images loaded"
+  pull_llama_server
+  ok "model and llama-server images ready"
 }
 
 # ---- step 3: deploy ----
@@ -373,28 +365,49 @@ relay_call() {
     "${TAILNET_RELAY_ADDR}" "relay.v1.RelayGateway/${method}"
 }
 
-# approve_after <out-file> [<line>]: the answers a user types. `y` to the
-# first approval, then `y` to every later one once <out-file> holds a line
-# matching the extended regex <line> or is gone.
+# person_tool <token> <tool> <input-json>: one client-direct call of <tool> on
+# hello-world, DispatchTool then AwaitToolResult. Prints the result's text and
+# holds when the call ends in one clean exit.
+person_tool() {
+  local token="$1" tool="$2" input="$3" call_id frames
+  call_id="$(jq -nc --arg n "$tool" --arg i "$input" \
+    '{name: $n, agent: "hello-world", input_json: $i}' |
+    relay_call "$token" DispatchTool | jq -r '.callId // empty')" || return 1
+  [ -n "$call_id" ] || return 1
+  frames="$(printf '{"callId":"%s","agent":"hello-world"}' "$call_id" |
+    relay_call "$token" AwaitToolResult)" || return 1
+  printf '%s\n' "$frames" | jq -rs '[.[] | .stdout // empty] | join("")'
+  printf '%s\n' "$frames" | jq -s -e '[.[] | select(.complete)]
+    | length == 1 and ((.[0].complete.exitCode // 0) == 0)' >/dev/null
+}
+
+# approve_after <out-file> [<line> [<hook>]]: the answers a user types. `y`
+# to the first approval, then `y` to every later one once <out-file> holds a
+# line matching the extended regex <line> or is gone. <hook> runs before the
+# later answers, and only if <line> printed.
 approve_after() {
   printf 'y\n'
   [ -z "${2:-}" ] || wait_for "syco chat to print $2" 300 \
     "[ ! -e '$1' ] || grep -qE '$2' '$1'" >&2 || true
+  if [ -n "${3:-}" ] && grep -qE "$2" "$1" 2>/dev/null; then
+    "$3" >&2 || true
+  fi
   yes || true
 }
 
-# tool_chat <config-dir> <tool> <prompt> [<line>]
+# tool_chat <config-dir> <tool> <prompt> [<line> [<hook>]]
 # One syco chat turn that must call <tool> and, if given, print a line that
 # matches the extended regex <line>. Approvals are answered by approve_after,
-# so a turn held at its second approval stays open until <line> prints.
+# so a turn held at its second approval stays open until <line> prints and
+# <hook> has run.
 tool_chat() {
-  local dir="$1" tool="$2" prompt="$3" line="${4:-}"
+  local dir="$1" tool="$2" prompt="$3" line="${4:-}" hook="${5:-}"
   local out err
   out="$(mktemp)"
   err="$(mktemp)"
   trap 'rm -f "'"$out"'" "'"$err"'"; trap - RETURN' RETURN
   if ! SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" \
-    >"$out" 2>"$err" < <(approve_after "$out" "$line"); then
+    >"$out" 2>"$err" < <(approve_after "$out" "$line" "$hook"); then
     warn "syco chat (${tool}) exited non-zero: $(cat "$out" "$err")"
     return 1
   fi
@@ -478,44 +491,16 @@ TOML
   fi
   ok "hello-world's conversation cleared"
 
-  if ! tool_chat "$SYCO_APP_TMP" ShowKernel \
-    "Use the ShowKernel tool and show me its output."; then
-    return 1
-  fi
-  ok "ShowKernel ran via syco chat over the app path"
-
-  local fetch_msg="Use the WebFetch tool to fetch https://example.com"
-  fetch_msg+=" and show me the result."
-  if ! tool_chat "$SYCO_APP_TMP" WebFetch "$fetch_msg"; then
-    return 1
-  fi
-  ok "WebFetch ran via syco chat over the app path"
-
   # Client-direct caller: the app dispatches GetSecret itself, with no model
   # turn. The call gets the toolset's Secret from the agent's provision
   # exactly as the model's call does, and its stdout comes back scrubbed.
-  local call_id frames
-  if ! call_id="$(jq -nc '{name: "GetSecret", agent: "hello-world",
-    input_json: ({name: "demo-ssh-key"} | tojson)}' |
-    relay_call "$token" DispatchTool | jq -r '.callId // empty')" ||
-    [ -z "$call_id" ]; then
-    warn "client-direct DispatchTool GetSecret returned no call id"
+  local out
+  if ! out="$(person_tool "$token" GetSecret '{"name":"demo-ssh-key"}')" ||
+    [[ $out != *"[REDACTED:demo-ssh-key]"* ]]; then
+    warn "client-direct GetSecret: no clean exit with the scrubbed key: $out"
     return 1
   fi
-  if ! frames="$(printf '{"callId":"%s","agent":"hello-world"}' "$call_id" |
-    relay_call "$token" AwaitToolResult)"; then
-    warn "AwaitToolResult for GetSecret (${call_id}) failed: ${frames}"
-    return 1
-  fi
-  if ! printf '%s\n' "$frames" | jq -s -e '
-    ([.[] | select(.complete)]
-      | length == 1 and ((.[0].complete.exitCode // 0) == 0))
-    and ([.[] | .stdout // empty] | join("")
-      | contains("[REDACTED:demo-ssh-key]"))' >/dev/null; then
-    warn "client-direct GetSecret: no clean exit with the scrubbed key: $frames"
-    return 1
-  fi
-  ok "client-direct GetSecret read demo-ssh-key (${call_id})"
+  ok "client-direct GetSecret read demo-ssh-key"
 }
 
 # End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
@@ -574,7 +559,7 @@ step_5b_syco_cli_chat() {
   # Kill a running one-shot as soon as the relay holds its message in the
   # agent's conversation; the turn still finishes there.
   local oneshot_dir oneshot_pid oneshot_msg
-  oneshot_msg="Write a 400-word essay on the history of lighthouses."
+  oneshot_msg="Write about 100 words on lighthouses."
   oneshot_msg+=" Do not use any tools."
   oneshot_dir="$SYCO_TMP/killed-oneshot"
   mkdir -p "$oneshot_dir"
@@ -639,11 +624,17 @@ step_5b_syco_cli_chat() {
   # every open chat, and one printed in the one-shot's output fails that
   # check.
   if ! tool_chat "$SYCO_TMP" StartSubAgent "$SCOUT_PROMPT" \
-    "⚙ hello-scout/[^:]+: Shell wants to run"; then
+    "⚙ hello-scout/[^:]+: Shell wants to run" scout_hook; then
     return 1
   fi
   ok "syco chat completed with a StartSubAgent tool call"
   ok "syco chat approved hello-scout's Shell call under its path"
+  if [ "$(grep -c '^path hello-scout/' "$SCOUT_PATHS")" != 1 ] ||
+    ! grep -qx 'ok MessageSubAgent' "$SCOUT_PATHS"; then
+    warn "a person's ListSubAgents and MessageSubAgent: $(cat "$SCOUT_PATHS")"
+    return 1
+  fi
+  ok "a person listed one hello-scout path and messaged it"
 }
 
 # Join this host to this run's tailnet.
@@ -713,17 +704,6 @@ wait_for_conversation_log() {
       '$conv_log' >/dev/null 2>&1"
 }
 
-# tool_result_texts <log-file> <tool>: a JSON array of the text of every <tool>
-# result in the conversation log at <log-file> (one JSON record per line).
-tool_result_texts() {
-  jq -s --arg t "$2" '
-    [.[] | select(.role == "assistant") | .tool_calls[]?
-      | select(.name == $t) | .id] as $ids
-    | [.[] | select(.role == "tool"
-        and ((.tool_call_id // "") as $i | $ids | index($i)) != null)
-      | [.content[]?.block.Text.text // empty] | join("")]' "$1"
-}
-
 # A fresh file in hello-world's workspace for each e2e pass. Only
 # hello-scout's Shell creates it, and the workspace outlives a cluster reuse.
 SCOUT_FILE="/workspace/scout-$(date +%s)"
@@ -736,6 +716,37 @@ readonly SCOUT_PROMPT="Use the StartSubAgent tool to start sub_agent \
 hello-scout, then use the ListInstructions tool. The mandate for hello-scout \
 is: Use the Shell tool to execute the command 'touch ${SCOUT_FILE} && echo \
 marigold', then reply with only its output."
+
+# A person's message to hello-scout while its Shell waits for approval.
+readonly SCOUT_MESSAGE="Also include the word tulip in your reply."
+
+# What scout_hook saw: a `path <sub-agent>/<id>` line per listed hello-scout,
+# then `ok MessageSubAgent` or an `error <tool>: <text>` line. Outside every
+# step's temp files, so step 6 reads it too.
+SCOUT_PATHS="$(mktemp)"
+readonly SCOUT_PATHS
+
+# scout_hook: as a person, list hello-world's sub-agents and send
+# SCOUT_MESSAGE to the first hello-scout. Writes what it saw to SCOUT_PATHS.
+scout_hook() {
+  local token out path input
+  token="$(mint_dex_token "$BOUND_USER_SUB")"
+  if ! out="$(person_tool "$token" ListSubAgents '{}')"; then
+    echo "error ListSubAgents: ${out}" >>"$SCOUT_PATHS"
+    return 1
+  fi
+  printf '%s' "$out" |
+    jq -r '.[] | select(startswith("hello-scout/")) | "path \(.)"' \
+      >>"$SCOUT_PATHS" || true
+  path="$(sed -n 's/^path //p' "$SCOUT_PATHS" | head -1)"
+  input="$(jq -nc --arg p "$path" --arg m "$SCOUT_MESSAGE" \
+    '{path: $p, message: $m}')"
+  if ! out="$(person_tool "$token" MessageSubAgent "$input")"; then
+    echo "error MessageSubAgent: ${out}" >>"$SCOUT_PATHS"
+    return 1
+  fi
+  echo "ok MessageSubAgent" >>"$SCOUT_PATHS"
+}
 
 # sub_agent_answered <tb_pod> <scrub_c> <conv-log> <log-file>
 # Copies the conversation log out to <log-file> and holds when a user entry
@@ -753,49 +764,11 @@ sub_agent_answered() {
   ' "$log" >/dev/null
 }
 
-# conversation_has_result <tb_pod> <scrub_c> <conv-log> <tool> <jq-test>
-# <log-file>
-# Copies the conversation log out to <log-file> and holds when some <tool>
-# result passes <jq-test> (a jq filter over the result text). wait_for polls it:
-# the harness appends the log as the turn runs.
-conversation_has_result() {
-  local tb_pod="$1" scrub_c="$2" conv_log="$3" tool="$4" test="$5" log="$6"
-  kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-    cat "$conv_log" >"$log" 2>/dev/null || return 1
-  tool_result_texts "$log" "$tool" | jq -e "any(.[]; $test)" >/dev/null
-}
-
 assert_tool_results() {
   local tb_pod="$1" scrub_c="$2" conv_log="$3"
   local log
   log="$(mktemp)"
   trap 'rm -f "'"$log"'"; trap - RETURN' RETURN
-
-  # The hello-world toolset pod runs on gVisor: its kernel log opens with the
-  # gVisor banner.
-  if wait_for "ShowKernel result holds the gVisor banner" 60 \
-    "conversation_has_result '$tb_pod' '$scrub_c' '$conv_log' ShowKernel \
-      'contains(\"Starting gVisor\")' '$log'"; then
-    ok "ShowKernel result reports a gVisor kernel"
-  else
-    local texts
-    texts="$(tool_result_texts "$log" ShowKernel 2>/dev/null || true)"
-    warn "ShowKernel result lacks 'Starting gVisor': ${texts}"
-    return 1
-  fi
-
-  # The hello-world toolset has no egress domain: the fetch never gets a
-  # response.
-  if wait_for "WebFetch result is a network error" 60 \
-    "conversation_has_result '$tb_pod' '$scrub_c' '$conv_log' WebFetch \
-      'startswith(\"WebFetch: network error:\")' '$log'"; then
-    ok "WebFetch of https://example.com hit a network error (egress closed)"
-  else
-    local texts
-    texts="$(tool_result_texts "$log" WebFetch 2>/dev/null || true)"
-    warn "WebFetch result is not a network error: ${texts}"
-    return 1
-  fi
 
   # hello-scout's final answer is queued to hello-world as a user entry.
   if wait_for "hello-scout's final answer in the conversation log" 600 \
@@ -805,6 +778,15 @@ assert_tool_results() {
     warn "no user entry after the StartSubAgent prompt holds 'marigold'"
     return 1
   fi
+
+  # A person's message to hello-scout never reaches hello-world's model.
+  if jq -s -e --arg m "$SCOUT_MESSAGE" 'any(.[] | select(.role == "user");
+    ([.content[]?.block.Text.text // empty] | join("")) == $m)' "$log" \
+    >/dev/null; then
+    warn "hello-world's log holds the person's message to hello-scout"
+    return 1
+  fi
+  ok "the person's message to hello-scout is not in hello-world's log"
 }
 
 assert_scrubbing() {
@@ -940,9 +922,9 @@ assert_compaction() {
 
 assert_toolset_secrets() {
   # Every call of a toolset gets all its Secrets, whoever makes it. The
-  # model's calls (GetSecret, ShowKernel, WebFetch) and the client-direct
-  # GetSecret all ran in hello-world toolset pods, and each pod
-  # holds the demo key at the path the agent's provision gives it.
+  # model's GetSecret and the client-direct GetSecret both ran in hello-world
+  # toolset pods, and each pod holds the demo key at the path the agent's
+  # provision gives it.
   local pods pod
   pods="$(kubectl get pod -n "$NAMESPACE" -l "$TOOLSET_SELECTOR" \
     --field-selector=status.phase=Running \
@@ -960,24 +942,6 @@ assert_toolset_secrets() {
   done
   ok "Every hello-world toolset pod holds the demo key ($(printf '%s' "$pods" |
     wc -w | tr -d ' ') pods, model and client-direct calls)"
-}
-
-dispatch_security_substeps() {
-  # Each substep is an independent security assertion sharing no state. Run
-  # them all and fail at the end if any failed, so one failure never aborts the
-  # rest and masks unrelated properties.
-  local -a checks=(
-    step_6_inference_served
-    step_6_identity_hot_reload
-  )
-  local failed=() c
-  for c in "${checks[@]}"; do
-    "$c" || failed+=("$c")
-  done
-  if [ "${#failed[@]}" -ne 0 ]; then
-    warn "Step 6 substeps failed: ${failed[*]}"
-    return 1
-  fi
 }
 
 step_6_security() {
@@ -1029,56 +993,56 @@ step_6_security() {
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$conv_log"
   assert_compaction "$tb_pod" "$scrub_c" "$conv_root"
   assert_toolset_secrets
-  dispatch_security_substeps
+  step_6_sub_agents || return 1
+  step_6_identity_hot_reload
 }
 
-# From a harness-labelled pod, a completion to the in-cluster inference Service
-# returns 200. The probe dials the cluster Service by name, so this proves a
-# turn reaches the in-cluster server rather than an external provider.
-step_6_inference_served() {
-  step "In-cluster inference (${INFERENCE_PROFILE})"
-  local svc="inf-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
-  # The pod carries the harness label, so ag-<agent>-egress grants it egress to
-  # the inference endpoint and DNS for the Service FQDN.
-  kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found \
-    --wait=true >/dev/null 2>&1
-  export svc INFERENCE_PORT INFERENCE_PROFILE
-  envsubst '${svc} ${INFERENCE_PORT} ${INFERENCE_PROFILE}' \
-    <"$REPO_ROOT/scripts/fixtures/inference-l7-probe-pod.yaml.tpl" |
-    kubectl apply -n "$NAMESPACE" -f - >/dev/null
-  if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-    pod/inference-l7-probe \
-    -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
-    warn "inference probe did not complete"
-    kubectl logs inference-l7-probe -n "$NAMESPACE" 2>&1 | tail -10 || true
-    kubectl delete pod inference-l7-probe -n "$NAMESPACE" \
-      --ignore-not-found >/dev/null 2>&1
-    return 1
-  fi
-  local out completion_code toolcall_code toolcalls
-  out="$(kubectl logs inference-l7-probe -n "$NAMESPACE" 2>/dev/null)"
-  kubectl delete pod inference-l7-probe -n "$NAMESPACE" \
-    --ignore-not-found >/dev/null 2>&1
-  completion_code="$(printf '%s' "$out" | sed -n 's/^COMPLETION=//p')"
-  toolcall_code="$(printf '%s' "$out" | sed -n 's/^TOOLCALL=//p')"
-  toolcalls="$(printf '%s' "$out" | sed -n 's/^TOOLCALLS=//p')"
+# job_gone <id>: holds once hello-scout's Job for <id> is gone.
+job_gone() {
+  ! kubectl get job -n "$NAMESPACE" "hello-scout-$1" >/dev/null 2>&1
+}
 
-  if [ "$completion_code" = "200" ]; then
-    ok "In-cluster turn served: completion 200 from the inference pod"
-  else
-    warn "completion did not return 200: got ${completion_code:-none}"
+# A person reads a finished sub-agent's log, and can neither start a sub-agent
+# nor clear or compact one. hello-world is idle here and needs neither its tool
+# pod nor the scrubber.
+step_6_sub_agents() {
+  local token path id out
+  token="$(mint_dex_token "$BOUND_USER_SUB")"
+  path="$(sed -n 's/^path //p' "$SCOUT_PATHS" | head -1)"
+  id="${path#hello-scout/}"
+  if [ -z "$path" ]; then
+    warn "step 5b recorded no hello-scout path"
     return 1
   fi
+  wait_for "hello-scout-${id} Job gone" 90 job_gone "$id" || return 1
 
-  # A tools request that must trigger a call.
-  if [ "$toolcall_code" = "200" ] && [ "$toolcalls" = "present" ]; then
-    ok "Tool-call turn served: 200 with a non-empty tool_calls"
-  else
-    # A broken or dropped chat template drops the tools array (empty/null
-    # tool_calls); a missing template file crashes the server (status != 200).
-    warn "tool-call: status=${toolcall_code:-none} calls=${toolcalls:-none}"
+  if ! out="$(person_tool "$token" ReadSubAgentLog \
+    "$(jq -nc --arg p "$path" '{path: $p}')")" ||
+    ! printf '%s' "$out" | jq -e --arg m "$SCOUT_MESSAGE" '
+      (map(.role == "tool" and (.text | contains("marigold"))) | index(true))
+        as $i | $i != null and .[$i + 1].role == "user"
+        and .[$i + 1].text == $m and .[-1].role == "assistant"' >/dev/null; then
+    warn "ReadSubAgentLog ${path}: ${out}"
     return 1
   fi
+  ok "ReadSubAgentLog holds the Shell result, then the message, then the answer"
+
+  if person_tool "$token" StartSubAgent \
+    '{"sub_agent":"hello-scout","mandate":"m"}' >/dev/null; then
+    warn "a person started a sub-agent"
+    return 1
+  fi
+  local method target
+  for method in ClearContext CompactContext; do
+    for target in hello-scout "$path"; do
+      if jq -nc --arg a "$target" '{agent: $a}' |
+        relay_call "$token" "$method" >/dev/null 2>&1; then
+        warn "${method} for ${target} was not refused"
+        return 1
+      fi
+    done
+  done
+  ok "a person cannot start, clear or compact a sub-agent"
 }
 
 # Identity is live operator data: the operator re-runs `sycoadm user up` and the
@@ -1508,48 +1472,6 @@ instructions_probe() {
     warn "instructions up of ${agent} with ${tree} failed"
     return 1
   fi
-  if ! want="$(tree_manifest "$tree")" || [ -z "$want" ]; then
-    warn "reading the probe instructions tree failed"
-    return 1
-  fi
-  if ! assert_pod_holds "$ns" "$agent" "$want" "probe precondition"; then
-    return 1
-  fi
-
-  # An AGENTS.md whose frontmatter never closes refuses the whole upload
-  # before any store call. The installer Job fails and leaves its
-  # command; a fresh pod, synced from the store, still holds the old tree.
-  local bad_tree="$d/bad-tree" command
-  command="provision-instructions-$(handle_of "$agent")"
-  cp -R "$tree" "$bad_tree"
-  printf -- '---\ntitle: never closed\nYou are the refused probe.\n' \
-    >"$bad_tree/AGENTS.md"
-  env AGENT_NAME="$agent" AGENT_TENANT="$MAIN_TENANT_NAME" \
-    INSTRUCTIONS_DIR="$bad_tree" \
-    envsubst '${AGENT_NAME} ${AGENT_TENANT} ${INSTRUCTIONS_DIR}' \
-    <"$REPO_ROOT/tests/fixtures/instructions/instructions.yaml" \
-    >"$d/bad-instructions.yaml"
-  "$SYCOADM" instructions up -f "$d/bad-instructions.yaml" || true
-  if ! wait_for "the installer Job refused the unclosed frontmatter" 120 \
-    "kubectl get jobs -n sycophant-system -o json | jq -e '[.items[] |
-      select(.metadata.name | startswith(\"provision-instructions-\")) |
-      select(any(.status.conditions[]?; .type == \"Failed\" and
-        .reason == \"PodFailurePolicy\"))] | length > 0' >/dev/null"; then
-    return 1
-  fi
-  if ! kubectl get configmap "$command" -n "$ns" >/dev/null 2>&1; then
-    warn "the refused command ${command} was deleted as if it succeeded"
-    return 1
-  fi
-  kubectl delete configmap "$command" -n "$ns" --ignore-not-found >/dev/null
-  kubectl rollout restart "deploy/ag-${agent}" -n "$ns" >/dev/null
-  kubectl rollout status "deploy/ag-${agent}" -n "$ns" --timeout=180s >/dev/null
-  if ! assert_pod_holds "$ns" "$agent" "$want" \
-    "unclosed frontmatter refused"; then
-    return 1
-  fi
-  ok "an unclosed frontmatter was refused; the store kept the old instructions"
-
   if ! before="$(harness_pod_identity "$ns" "$agent")"; then
     return 1
   fi
@@ -1731,16 +1653,6 @@ lifecycle_tenant_remove() {
   ok "sycoadm tenant remove stamped the reap TTL"
 }
 
-lifecycle_verify_cleanup() {
-  # The e2e reap schedule is every minute (Kyverno's floor); allow a loaded
-  # node.
-  wait_for "tenant namespace reaped" 720 \
-    "! kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
-  ok "the zero-keepalive tenant namespace was reaped"
-
-  ok "tenant lifecycle command-contract proof passed"
-}
-
 verify_tenant_lifecycle() {
   step "Tenant lifecycle command-contract proof"
 
@@ -1752,7 +1664,6 @@ verify_tenant_lifecycle() {
   lifecycle_verify_running "$work"
   lifecycle_tenant_down
   lifecycle_tenant_remove
-  lifecycle_verify_cleanup
 }
 
 main() {

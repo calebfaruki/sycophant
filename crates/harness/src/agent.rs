@@ -4,6 +4,7 @@ use toolset_proto::TurnRequest;
 
 use crate::clients::InferenceRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog};
+use crate::queue::Inbox;
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
@@ -20,6 +21,8 @@ pub(crate) struct LoopMode {
     /// Fires on a client `CancelTurn`; the loop abandons the in-flight stream
     /// and returns `LoopError::Cancelled`.
     pub cancel: tokio_util::sync::CancellationToken,
+    /// A sub-agent's messages, folded in before each next model request.
+    pub inbox: Inbox,
 }
 
 /// Why the loop stopped without natural completion.
@@ -95,6 +98,7 @@ pub(crate) async fn llm_loop(
     let idle_gap = mode.idle_gap;
     let cancel = mode.cancel;
     let has_client = mode.has_client;
+    let inbox = mode.inbox;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
     // item ids stay stable.
     let mut emit = turn::EmitState::new(mode.message_id);
@@ -124,100 +128,113 @@ pub(crate) async fn llm_loop(
 
         tracing::info!(stop_reason = ?result.stop_reason, "model responded");
 
-        match result.stop_reason {
-            StopReason::EndTurn => {
-                let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, &attribution).await;
-                return Ok(content_text(&result.content));
+        // ToolUse with no tool calls ends the turn as EndTurn does, rather
+        // than burning iterations on retries.
+        let text_only = match result.stop_reason {
+            StopReason::EndTurn | StopReason::MaxTokens => true,
+            StopReason::ToolUse => result.tool_calls.is_empty(),
+            other => return Err(LoopError::Halt(LoopHalt::UnknownStop(other))),
+        };
+        if !text_only {
+            for tc in &result.tool_calls {
+                tracing::info!(tool = %tc.name, "tool call detected");
             }
-            StopReason::MaxTokens => {
-                let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, &attribution).await;
-                return Err(LoopError::Halt(LoopHalt::MaxTokens(content_text(
-                    &result.content,
-                ))));
-            }
-            StopReason::ToolUse => {
-                if result.tool_calls.is_empty() {
-                    // ToolUse stop reason but no tool calls — treat as an
-                    // EndTurn equivalent. Surface the text once rather than
-                    // burning iterations on retries.
-                    let assistant = assistant_message(&result);
-                    persist_assistant(log, &assistant, &attribution).await;
-                    return Ok(content_text(&result.content));
-                }
-
-                for tc in &result.tool_calls {
-                    tracing::info!(tool = %tc.name, "tool call detected");
-                }
-
-                iterations += 1;
-                if iterations >= max_iterations {
-                    return Err(LoopError::Halt(LoopHalt::IterationLimit {
-                        limit: max_iterations,
-                    }));
-                }
-
-                // Persist the assistant tool-use turn before the results so
-                // the log (and resent history) stays provider-valid: every
-                // tool result is preceded by its assistant tool_use.
-                let assistant = assistant_message(&result);
-                persist_assistant(log, &assistant, &attribution).await;
-                request.messages.push(assistant);
-
-                for tc in &result.tool_calls {
-                    let (content, is_error) = match tool_router
-                        .call_tool(&tc.name, &tc.input_json, has_client, &tc.id, &cancel)
-                        .await
-                    {
-                        Ok(resp) => (resp.content, resp.is_error),
-                        // A cancelled tool call is terminal: hard-exit the whole
-                        // turn as Cancelled. It must not fold partial output into
-                        // an is_error tool result. But the assistant tool_use was
-                        // just persisted, so first give it and every later call of
-                        // the message a synthetic matching tool result — an error
-                        // carrying only a cancellation marker, no partial output —
-                        // keeping the resent history provider-valid (every
-                        // tool_use has a paired result).
-                        Err(DispatchAbort::Cancelled) => {
-                            if let Err(e) = log
-                                .write()
-                                .await
-                                .close_open_calls("tool call cancelled")
-                                .await
-                            {
-                                tracing::warn!(error = %e, "skipped persisting cancelled tool result");
-                            }
-                            return Err(LoopError::Cancelled);
-                        }
-                        Err(DispatchAbort::Error(e)) => {
-                            (vec![text_block(format!("tool call error: {e}"))], true)
-                        }
-                    };
-
-                    let tool_msg = Message {
-                        role: "tool".into(),
-                        content,
-                        tool_calls: vec![],
-                        tool_call_id: Some(tc.id.clone()),
-                        is_error: if is_error { Some(true) } else { None },
-                    };
-                    if let Err(e) = log.write().await.append(tool_msg.clone()).await {
-                        tracing::warn!(error = %e, "skipped persisting tool result");
-                    }
-                    request.messages.push(tool_msg);
-                }
-
-                stream = inference
-                    .turn(request.clone())
-                    .await
-                    .map_err(LoopError::Inference)?;
-            }
-            other => {
-                return Err(LoopError::Halt(LoopHalt::UnknownStop(other)));
+            iterations += 1;
+            if iterations >= max_iterations {
+                return Err(LoopError::Halt(LoopHalt::IterationLimit {
+                    limit: max_iterations,
+                }));
             }
         }
+
+        // Persist the assistant turn before any tool result so the log (and
+        // resent history) stays provider-valid: every tool result is
+        // preceded by its assistant tool_use.
+        let assistant = assistant_message(&result);
+        persist_assistant(log, &assistant, &attribution).await;
+        request.messages.push(assistant);
+
+        if !text_only {
+            for tc in &result.tool_calls {
+                let (content, is_error) = match tool_router
+                    .call_tool(&tc.name, &tc.input_json, has_client, &tc.id, &cancel)
+                    .await
+                {
+                    Ok(resp) => (resp.content, resp.is_error),
+                    // A cancelled tool call is terminal: hard-exit the whole
+                    // turn as Cancelled. It must not fold partial output into
+                    // an is_error tool result. But the assistant tool_use was
+                    // just persisted, so first give it and every later call of
+                    // the message a synthetic matching tool result — an error
+                    // carrying only a cancellation marker, no partial output —
+                    // keeping the resent history provider-valid (every
+                    // tool_use has a paired result).
+                    Err(DispatchAbort::Cancelled) => {
+                        if let Err(e) = log
+                            .write()
+                            .await
+                            .close_open_calls("tool call cancelled")
+                            .await
+                        {
+                            tracing::warn!(error = %e, "skipped persisting cancelled tool result");
+                        }
+                        return Err(LoopError::Cancelled);
+                    }
+                    Err(DispatchAbort::Error(e)) => {
+                        (vec![text_block(format!("tool call error: {e}"))], true)
+                    }
+                };
+
+                let tool_msg = Message {
+                    role: "tool".into(),
+                    content,
+                    tool_calls: vec![],
+                    tool_call_id: Some(tc.id.clone()),
+                    is_error: if is_error { Some(true) } else { None },
+                };
+                if let Err(e) = log.write().await.append(tool_msg.clone()).await {
+                    tracing::warn!(error = %e, "skipped persisting tool result");
+                }
+                request.messages.push(tool_msg);
+            }
+        }
+        if !fold_inbox(&inbox, log, &mut request).await && text_only {
+            let text = content_text(&result.content);
+            return match result.stop_reason {
+                StopReason::MaxTokens => Err(LoopError::Halt(LoopHalt::MaxTokens(text))),
+                _ => Ok(text),
+            };
+        }
+
+        stream = inference
+            .turn(request.clone())
+            .await
+            .map_err(LoopError::Inference)?;
     }
+}
+
+/// Append each message in `inbox` as a user entry to `log` and `request`.
+/// Returns whether there were any.
+async fn fold_inbox(
+    inbox: &Inbox,
+    log: &RwLock<ConversationLog>,
+    request: &mut TurnRequest,
+) -> bool {
+    let messages = inbox.drain();
+    for text in &messages {
+        let msg = Message {
+            role: "user".into(),
+            content: vec![text_block(text.clone())],
+            tool_calls: vec![],
+            tool_call_id: None,
+            is_error: None,
+        };
+        if let Err(e) = log.write().await.append(msg.clone()).await {
+            tracing::warn!(error = %e, "skipped persisting a message");
+        }
+        request.messages.push(msg);
+    }
+    !messages.is_empty()
 }
 
 #[cfg(test)]
@@ -318,6 +335,133 @@ mod tests {
             message_id: "mid-1".into(),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
+            inbox: Inbox::default(),
+        }
+    }
+
+    const M: &str = "Also include the word tulip in your reply.";
+
+    /// `role: text` for each message.
+    fn lines(messages: &[Message]) -> Vec<String> {
+        let line = |m: &Message| format!("{}: {}", m.role, content_text(&m.content));
+        messages.iter().map(line).collect()
+    }
+
+    /// Returns `result` for every call, and `M` reaches the inbox meanwhile.
+    struct MessagingRouter(Inbox);
+
+    #[async_trait::async_trait]
+    impl ToolDispatcher for MessagingRouter {
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _input_json: &str,
+            _has_client: bool,
+            _tool_call_id: &str,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<CallToolResponse, DispatchAbort> {
+            self.0.push(M.into());
+            Ok(CallToolResponse {
+                content: vec![text_block("result".into())],
+                is_error: false,
+            })
+        }
+    }
+
+    /// Scripted turns where `M` reaches the inbox while the first reply streams.
+    struct MessageDuringFirstReply(ScriptedTurns, Inbox);
+
+    #[async_trait::async_trait]
+    impl InferenceRpc for MessageDuringFirstReply {
+        async fn turn(
+            &mut self,
+            request: TurnRequest,
+        ) -> Result<Box<dyn crate::clients::TurnSource>, String> {
+            if self.0.requests().is_empty() {
+                self.1.push(M.into());
+            }
+            self.0.turn(request).await
+        }
+    }
+
+    /// Run `llm_loop` with `inbox`. Returns its result and the log's lines.
+    async fn run_with_inbox(
+        tb: &mut dyn InferenceRpc,
+        router: &dyn ToolDispatcher,
+        inbox: Inbox,
+    ) -> (Result<String, LoopError>, Vec<String>) {
+        let log = fresh_log();
+        let mode = LoopMode {
+            inbox,
+            ..mode(false)
+        };
+        let req = user_request(None);
+        let attribution = AssistantAttribution::default();
+        let mut sink = turn::NullSink;
+        let result = llm_loop(10, tb, router, &log, attribution, req, mode, &mut sink).await;
+        let logged = lines(&log.read().await.history_for_provider());
+        (result, logged)
+    }
+
+    #[tokio::test]
+    async fn a_message_during_a_tool_call_lands_after_its_result_and_before_the_next_request() {
+        let inbox = Inbox::default();
+        let mut tb = ScriptedTurns::new(vec![
+            complete_turn(StopReason::ToolUse, "", &[("tc1", "Bash", "{}")]),
+            complete_turn(StopReason::EndTurn, "done", &[]),
+        ]);
+        let router = MessagingRouter(inbox.clone());
+        let (result, logged) = run_with_inbox(&mut tb, &router, inbox).await;
+
+        assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
+        let sent = tb.requests().get(1).map(|r| lines(&r.messages));
+        let folded = ["assistant: ", "tool: result", &format!("user: {M}")].map(String::from);
+        assert_eq!(
+            sent,
+            Some([&["user: hello".to_string()][..], &folded].concat()),
+            "the next request holds the message after the tool's result"
+        );
+        assert_eq!(
+            logged,
+            [&folded[..], &["assistant: done".to_string()]].concat(),
+            "the log holds it in the same place"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_during_the_last_model_reply_gets_another_request_before_the_answer() {
+        // One row per arm that returns text.
+        for stop in [
+            StopReason::EndTurn,
+            StopReason::MaxTokens,
+            StopReason::ToolUse,
+        ] {
+            let inbox = Inbox::default();
+            let mut tb = MessageDuringFirstReply(
+                ScriptedTurns::new(vec![
+                    complete_turn(stop, "first", &[]),
+                    complete_turn(StopReason::EndTurn, "final", &[]),
+                ]),
+                inbox.clone(),
+            );
+            let (result, logged) = run_with_inbox(&mut tb, &FakeRouter::empty(), inbox).await;
+
+            assert!(
+                matches!(result, Ok(ref s) if s == "final"),
+                "{stop:?}: the answer comes after the message, got {result:?}"
+            );
+            let folded = ["assistant: first".to_string(), format!("user: {M}")];
+            let sent = tb.0.requests().get(1).map(|r| lines(&r.messages));
+            assert_eq!(
+                sent,
+                Some([&["user: hello".to_string()][..], &folded].concat()),
+                "{stop:?}: the next request holds the message"
+            );
+            assert_eq!(
+                logged,
+                [&folded[..], &["assistant: final".to_string()]].concat(),
+                "{stop:?}: the log holds the message before the answer"
+            );
         }
     }
 

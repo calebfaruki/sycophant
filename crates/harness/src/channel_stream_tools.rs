@@ -9,9 +9,12 @@ use proto_common::{text_block, CallToolResponse, ToolInfo};
 
 use crate::clients::RelayRpc;
 
+// TODO: fix or remove these three tools. No client supports them (syco
+// supports approvals only), so the relay refuses every call and the model
+// gets an error.
 const REVEAL_PATH: &str = "RevealPath";
-const REQUEST_USER_INPUT: &str = "RequestUserInput";
-const REQUEST_USER_AUTH: &str = "RequestUserAuth";
+pub(crate) const REQUEST_USER_INPUT: &str = "RequestUserInput";
+pub(crate) const REQUEST_USER_AUTH: &str = "RequestUserAuth";
 const REQUEST_TIMEOUT_SECONDS: u32 = 30;
 
 /// Whether a tool waits for a client response (Request) or fires and

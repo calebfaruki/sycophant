@@ -280,15 +280,19 @@ impl ToolRouter {
         self
     }
 
-    /// Offer `StartSubAgent`, backed by `hub`.
+    /// Offer the sub-agent tools, backed by `hub`.
     pub(crate) fn with_sub_agents(mut self, hub: Arc<DispatchHub>) -> Self {
         let mut tools = (**self.tools.load()).clone();
-        tools.push(CatalogEntry {
-            info: runtime_tools::start_sub_agent_definition(),
-            source: Source::Runtime,
-            args: Vec::new(),
-            secrets: Vec::new(),
-        });
+        tools.extend(
+            runtime_tools::sub_agent_definitions()
+                .into_iter()
+                .map(|info| CatalogEntry {
+                    info,
+                    source: Source::Runtime,
+                    args: Vec::new(),
+                    secrets: Vec::new(),
+                }),
+        );
         tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         self.tools.store(Arc::new(tools));
         self.hub = Some(hub);
@@ -419,14 +423,23 @@ impl ToolRouter {
         tool_call_id: &str,
         // The parent turn's cancel token. The approval request and the
         // `Toolset` and `ChannelStream` arms race it against their wait; a
-        // `Runtime` tool ignores it once approved.
+        // `Runtime` tool ignores it.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
             .source_of(name)
             .ok_or_else(|| DispatchAbort::Error(format!("unknown tool: {name}")))?;
-        if let Approval::Refused(refusal) = self.ask_approval(name, input_json, cancel).await? {
-            return Ok(refusal);
+        // The agent's own message and stop to its sub-agent ask no approval.
+        let unasked = source == Source::Runtime
+            && [
+                runtime_tools::MESSAGE_SUB_AGENT_TOOL_NAME,
+                runtime_tools::STOP_SUB_AGENT_TOOL_NAME,
+            ]
+            .contains(&name);
+        if !unasked {
+            if let Approval::Refused(refusal) = self.ask_approval(name, input_json, cancel).await? {
+                return Ok(refusal);
+            }
         }
         match source {
             Source::Toolset => {
@@ -437,8 +450,8 @@ impl ToolRouter {
                     .await
             }
             Source::Runtime => match &self.hub {
-                Some(hub) if name == runtime_tools::START_SUB_AGENT_TOOL_NAME => {
-                    Ok(runtime_tools::dispatch_start_sub_agent(input_json, hub).await)
+                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name) => {
+                    Ok(runtime_tools::dispatch_sub_agent_tool(name, input_json, hub).await)
                 }
                 _ => runtime_tools::dispatch(
                     name,
@@ -646,13 +659,24 @@ impl ToolRouter {
         let instructions = self.instructions.clone();
         let agent = self.agent.clone();
         let agent_state = self.agent_state.clone();
+        // A person may use every sub-agent tool but `StartSubAgent`.
+        let hub = self
+            .hub
+            .clone()
+            .filter(|_| name != runtime_tools::START_SUB_AGENT_TOOL_NAME);
         let name = name.to_string();
         let input_json = input_json.to_string();
 
         tokio::spawn(async move {
-            let dispatched =
-                runtime_tools::dispatch(&name, &input_json, &instructions, &agent, &agent_state)
-                    .await;
+            let dispatched = match hub {
+                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name.as_str()) => {
+                    Ok(runtime_tools::dispatch_sub_agent_tool(&name, &input_json, &hub).await)
+                }
+                _ => {
+                    runtime_tools::dispatch(&name, &input_json, &instructions, &agent, &agent_state)
+                        .await
+                }
+            };
             let response = match dispatched {
                 Ok(response) => response,
                 Err(e) => CallToolResponse {
@@ -2176,14 +2200,16 @@ mod tests {
         use crate::dispatch_hub::test_support::{endpoints, silent_endpoint, test_hub};
         let root = tempfile::TempDir::new().unwrap().keep();
         write_md(&root, &format!("{TEST_AG}/skills/a.md"), "# A\n\nAlpha.\n");
-        // Seven approvals, plus the answers to the two requests to the user.
+        // Nine approvals, plus the answers to the two requests to the user.
         let answers = std::iter::repeat_with(RelayAnswer::approve);
-        let relay = ScriptedRelay::new(answers.take(9).collect());
+        let relay = ScriptedRelay::new(answers.take(11).collect());
         let hub = test_hub(
             endpoints(vec![], silent_endpoint()),
             ScriptedRelay::default(),
             vec![],
         );
+        let log = crate::test_doubles::record("user", "m");
+        write_md(&hub.root, &format!("{SUB_PATH}/conversation.log"), &log);
         let router: ToolRouter = ToolRouter::new(
             Arc::new(Instructions::new(root)),
             TEST_AG.to_string(),
@@ -2201,6 +2227,8 @@ mod tests {
             ("ListInstructions", "{}"),
             ("Think", r#"{"note":"n"}"#),
             ("StartSubAgent", r#"{"sub_agent":"sub","mandate":"m"}"#),
+            ("ListSubAgents", "{}"),
+            ("ReadSubAgentLog", r#"{"path":"sub/0a1b2c3d"}"#),
         ];
         for (name, input) in tools {
             let resp = router
@@ -2318,6 +2346,7 @@ mod tests {
                     message_id: String::new(),
                     idle_gap: std::time::Duration::from_secs(45),
                     cancel: CancellationToken::new(),
+                    inbox: crate::queue::Inbox::default(),
                 },
                 &mut sink,
             ),
@@ -2514,5 +2543,206 @@ mod tests {
             (path, "the answer".to_string()),
             "the attach outlives the turn and queues the later answer"
         );
+    }
+
+    const SUB_PATH: &str = "sub/0a1b2c3d";
+    const SUB_OTHER: &str = "sub/12345678";
+
+    /// A person's call of `name`: its assembled result.
+    async fn client_call(router: &ToolRouter, name: &str, input: &str) -> CallToolResponse {
+        let call_id = router
+            .dispatch_client_tool(name, input)
+            .await
+            .unwrap_or_else(|e| panic!("a person can call {name}, got {e}"));
+        drain_client_call(router, &call_id).await.0
+    }
+
+    /// A hub of two fake sub-agents, attached at `SUB_PATH` and `SUB_OTHER`,
+    /// and a router over the hub's own agent state that offers it. Returns
+    /// each fake's link and inbox.
+    async fn two_sub_agents(
+        relay: ScriptedRelay,
+    ) -> (
+        crate::dispatch_hub::test_support::TestHub,
+        ToolRouter,
+        Vec<(crate::dispatch_link::ParentLink, crate::queue::Inbox)>,
+    ) {
+        use crate::dispatch_hub::test_support::*;
+        let fakes: Vec<_> = (0..2)
+            .map(|_| {
+                let inbox = crate::queue::Inbox::default();
+                (sub_agent_link_with(inbox.clone()), inbox)
+            })
+            .collect();
+        let uris = endpoints(
+            vec![
+                (SUB_PATH, serve(fakes[0].0.clone())),
+                (SUB_OTHER, serve(fakes[1].0.clone())),
+            ],
+            silent_endpoint(),
+        );
+        let h = test_hub(uris, ScriptedRelay::default(), vec![]);
+        for path in [SUB_PATH, SUB_OTHER] {
+            h.hub.attach(path.into());
+            attached(&h, path).await;
+        }
+        let router = ToolRouter::new(
+            test_instructions(),
+            TEST_AG.to_string(),
+            None,
+            h.agent_state.clone(),
+        )
+        .with_relay(relay)
+        .with_sub_agents(h.hub.clone());
+        (h, router, fakes)
+    }
+
+    #[tokio::test]
+    async fn a_log_is_read_by_its_path_with_no_live_attach() {
+        use crate::dispatch_hub::test_support::silent_endpoint;
+        use crate::test_doubles::record;
+        let (h, router) = start_router(silent_endpoint(), ScriptedRelay::default());
+        let log = record("user", "the mandate") + &record("assistant", "the answer");
+        write_md(&h.root, &format!("{SUB_PATH}/conversation.log"), &log);
+
+        let input = serde_json::json!({ "path": SUB_PATH }).to_string();
+        let resp = client_call(&router, "ReadSubAgentLog", &input).await;
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&text_of(&resp))
+            .unwrap_or_else(|_| panic!("want the log's entries, got {}", text_of(&resp)));
+        let got: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|e| {
+                (
+                    e["role"].as_str().unwrap_or(""),
+                    e["text"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(got, [("user", "the mandate"), ("assistant", "the answer")]);
+    }
+
+    #[tokio::test]
+    async fn only_an_existing_sub_agent_folders_log_is_read() {
+        use crate::dispatch_hub::test_support::silent_endpoint;
+        let (h, router) = start_router(silent_endpoint(), ScriptedRelay::default());
+        let log = crate::test_doubles::record("user", "not yours");
+        let mut read = Vec::new();
+        for path in [
+            "../x",
+            "sub/../../conversation.log",
+            "sub/ABCDEFGH",
+            "conversations",
+            "hello-scout/0000abcd",
+        ] {
+            // Every path but the absent one reaches a log.
+            if path != "hello-scout/0000abcd" {
+                write_md(&h.root, &format!("{path}/conversation.log"), &log);
+            }
+            let input = serde_json::json!({ "path": path }).to_string();
+            if !client_call(&router, "ReadSubAgentLog", &input)
+                .await
+                .is_error
+            {
+                read.push(path);
+            }
+        }
+        assert!(read.is_empty(), "must be refused: {read:?}");
+    }
+
+    #[tokio::test]
+    async fn a_person_lists_the_ready_paths() {
+        use crate::dispatch_hub::test_support::{endpoints, silent_endpoint, test_hub};
+        let listed = vec![SUB_PATH.to_string(), SUB_OTHER.to_string()];
+        let h = test_hub(
+            endpoints(vec![], silent_endpoint()),
+            ScriptedRelay::default(),
+            listed.clone(),
+        );
+        let router = empty_router().with_sub_agents(h.hub.clone());
+
+        let resp = client_call(&router, "ListSubAgents", "{}").await;
+        let paths: Vec<String> = serde_json::from_str(&text_of(&resp))
+            .unwrap_or_else(|_| panic!("want a JSON array of paths, got {}", text_of(&resp)));
+        assert_eq!(paths, listed);
+    }
+
+    #[tokio::test]
+    async fn a_persons_message_reaches_one_sub_agent_unchanged_and_not_the_agent() {
+        use crate::dispatch_hub::test_support::landed;
+        let (h, router, fakes) = two_sub_agents(ScriptedRelay::default()).await;
+        let text = "  Also include the word tulip.\n ";
+        let input = serde_json::json!({ "path": SUB_PATH, "message": text }).to_string();
+        client_call(&router, "MessageSubAgent", &input).await;
+
+        assert_eq!(landed(&fakes[0].1).await, [text], "it lands unchanged");
+        assert!(
+            fakes[1].1.drain().is_empty(),
+            "the other sub-agent gets none"
+        );
+        assert!(
+            h.agent_state.queue().pop().await.is_none(),
+            "nothing is queued for the agent"
+        );
+        let history = h.agent_state.log().read().await.history_for_provider();
+        assert!(history.is_empty(), "the agent's log holds nothing");
+    }
+
+    #[tokio::test]
+    async fn a_persons_stop_reaches_only_the_named_sub_agent() {
+        let (_h, router, fakes) = two_sub_agents(ScriptedRelay::default()).await;
+        let input = serde_json::json!({ "path": SUB_PATH }).to_string();
+        client_call(&router, "StopSubAgent", &input).await;
+
+        let wait = |ms| std::time::Duration::from_millis(ms);
+        tokio::time::timeout(wait(5000), fakes[0].0.stopped())
+            .await
+            .expect("the named sub-agent stops");
+        let other = tokio::time::timeout(wait(200), fakes[1].0.stopped()).await;
+        assert!(other.is_err(), "the other sub-agent runs on");
+    }
+
+    #[tokio::test]
+    async fn the_agents_message_and_stop_succeed_and_only_they_skip_approval() {
+        // An empty script refuses any approval request.
+        let relay = ScriptedRelay::default();
+        let (_h, router, _) = two_sub_agents(relay.clone()).await;
+        let message = serde_json::json!({ "path": SUB_PATH, "message": "tulip" }).to_string();
+        let stop = serde_json::json!({ "path": SUB_PATH }).to_string();
+        let cancel = CancellationToken::new();
+        for (name, input) in [("MessageSubAgent", message), ("StopSubAgent", stop)] {
+            let resp = router.call_tool(name, &input, false, "tc", &cancel).await;
+            assert!(
+                !resp.expect("a tool result").is_error,
+                "{name} reaches the hub"
+            );
+        }
+        assert!(
+            relay.requests_for(APPROVAL).is_empty(),
+            "the agent's message and stop ask no approval"
+        );
+
+        // With no hub, a toolset tool of the same name still asks.
+        let relay = ScriptedRelay::new(vec![RelayAnswer::deny()]);
+        let router = seed(
+            empty_router().with_relay(relay.clone()),
+            vec![t("StopSubAgent")],
+        );
+        let cancel = CancellationToken::new();
+        let resp = router.call_tool("StopSubAgent", "{}", false, "tc", &cancel);
+        resp.await.expect("a tool result");
+        assert_eq!(
+            relay.requests_for(APPROVAL).len(),
+            1,
+            "one approval request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_cannot_start_a_sub_agent() {
+        use crate::dispatch_hub::test_support::silent_endpoint;
+        let (h, router) = start_router(silent_endpoint(), ScriptedRelay::default());
+        let resp = client_call(&router, START, r#"{"sub_agent":"sub","mandate":"m"}"#).await;
+        assert!(resp.is_error, "want an error frame, got {}", text_of(&resp));
+        assert!(h.jobs.lock().unwrap().is_empty(), "no Job is created");
     }
 }

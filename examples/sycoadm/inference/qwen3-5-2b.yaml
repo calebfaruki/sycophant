@@ -22,7 +22,7 @@ inference:
     memory: 2560Mi
     cpu: 4
     threads: 4
-    contextBudget: 8192
-    slots: 1
+    contextBudget: 16384
+    slots: 2
     temp: 0
     thinking: false

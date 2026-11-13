@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::conversation::{cut_torn_tail, ConversationLog, LocalFsStore, CONVERSATION_FILENAME};
 use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog, EXECUTION_LOG_FILENAME};
-use crate::queue::MessageQueue;
+use crate::queue::{Inbox, MessageQueue};
 
 /// The end entry boot writes for a tool call the log left open.
 const RESTART_TEXT: &str =
@@ -24,6 +24,8 @@ pub(crate) struct AgentState {
     slot: Mutex<()>,
     running: std::sync::Mutex<Option<CancellationToken>>,
     queue: MessageQueue,
+    /// A sub-agent's messages. Empty in an agent.
+    inbox: Inbox,
 }
 
 impl AgentState {
@@ -44,6 +46,7 @@ impl AgentState {
             slot: Mutex::new(()),
             running: std::sync::Mutex::new(None),
             queue: MessageQueue::default(),
+            inbox: Inbox::default(),
         })
     }
 
@@ -89,6 +92,10 @@ impl AgentState {
 
     pub(crate) fn queue(&self) -> &MessageQueue {
         &self.queue
+    }
+
+    pub(crate) fn inbox(&self) -> &Inbox {
+        &self.inbox
     }
 
     /// Waiters are served in arrival order (tokio's `Mutex` is fair).
