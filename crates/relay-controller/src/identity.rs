@@ -36,7 +36,7 @@ pub struct IdentityTable {
 }
 
 impl IdentityTable {
-    /// The subject's whole granted agent list, from the watched data.
+    /// The subject's whole agent list, from the watched data.
     pub fn agents_for(&self, subject: &str) -> Vec<String> {
         self.by_subject.get(subject).cloned().unwrap_or_default()
     }

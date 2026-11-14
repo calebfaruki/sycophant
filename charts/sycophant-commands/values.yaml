@@ -56,7 +56,7 @@
 # user:
 #   tenant: acme
 #   subject: "https://dex.example.com/dex#alice"
-#   agents: []               # the subject's granted agent names
+#   agents: []               # the agents the subject can reach
 #   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
 
 # channel:

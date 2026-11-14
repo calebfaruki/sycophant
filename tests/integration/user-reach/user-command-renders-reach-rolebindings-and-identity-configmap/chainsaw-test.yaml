@@ -8,9 +8,9 @@ spec:
     RoleBinding per listed agent plus the identity ConfigMap; the bound person
     can get only the listed agents' harness Services; an unlisted agent stays
     unreachable; removing the agent or the handle from the command cuts the
-    reach; a reaped and recreated agent reaches nobody until re-granted; a
+    reach; a reaped and recreated agent reaches nobody until listed again; a
     command naming a missing agent, or one created after the command, is
-    refused on every attempt and leaves existing grants untouched; a writer
+    refused on every attempt and leaves existing reach untouched; a writer
     with no namespace write RBAC is denied.
   timeouts:
     exec: 300s
@@ -45,7 +45,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               # Each agent's reach Role, rendered from the agent chart.
               # gamma's exists too — an agent provisioned after the user
-              # command — and must still grant nobody: no RoleBinding,
+              # command — and must still bind nobody: no RoleBinding,
               # no reach.
               for agent in alpha beta gamma; do
                 helm template "ag-$agent" "$REPO_ROOT/charts/sycophant-agent" \
@@ -54,12 +54,12 @@ spec:
                   | kubectl apply -f - >/dev/null
                 kubectl create service clusterip "ag-$agent" -n "$TENANT_NS" --tcp=9090 >/dev/null
               done
-              # Write times are whole seconds and a grant is refused unless its
-              # agent is strictly older, so let one tick before granting.
+              # Write times are whole seconds and a user command is refused unless its
+              # agent is strictly older, so let one tick before writing it.
               sleep 1
               true
     # The operator writes the command; the person it binds is alice.
-    - name: operator-grants-alice-alpha-and-beta
+    - name: operator-lists-alice-alpha-and-beta
       use:
         template: ../../step-templates/user-command.yaml
         with:
@@ -118,7 +118,7 @@ spec:
                 echo "$rb" | jq -e \
                   '.roleRef.kind == "Role" and .roleRef.name == "ag-'"$agent"'-reach"' >/dev/null \
                   || { echo "roleRef wrong on $agent: $rb"; exit 1; }
-                # Owned by the Role it binds, so the grant dies with it.
+                # Owned by the Role it binds, so it dies with it.
                 role_uid=$(kubectl get role "ag-$agent-reach" -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
                 echo "$rb" | jq -e --arg u "$role_uid" --arg n "ag-$agent-reach" \
                   '[.metadata.ownerReferences[] | select(.kind == "Role" and .name == $n and .uid == $u)] | length == 1' >/dev/null \
@@ -148,7 +148,7 @@ spec:
                   || { echo "alice cannot reach listed ag-$agent"; exit 1; }
               done
               # The unlisted agent is unreachable, created after the
-              # grant or not.
+              # command or not.
               [ "$(kubectl auth can-i get service/ag-gamma -n "$TENANT_NS" --as="$ALICE")" = no ] \
                 || { echo "alice reached unlisted ag-gamma"; exit 1; }
               # The user command granted no command-write: alice holds no
@@ -159,7 +159,7 @@ spec:
                 || { echo "alice can get configmaps; a user command must not grant command writes"; exit 1; }
               true
     # The operator removes beta from the list.
-    - name: re-grant-without-beta
+    - name: rewrite-without-beta
       use:
         template: ../../step-templates/user-command.yaml
         with:
@@ -176,7 +176,7 @@ spec:
               value: operator
             - name: expect
               value: admitted
-    - name: re-grant-without-the-agent-cuts-reach
+    - name: rewrite-without-the-agent-cuts-reach
       try:
         - script:
             timeout: 300s
@@ -188,19 +188,19 @@ spec:
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
               HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
-              # The re-grant replaces the release's objects: beta's binding
+              # The rewrite replaces the release's objects: beta's binding
               # goes rather than stacking beside the new set.
               for i in $(seq 1 120); do
                 kubectl get rolebinding "user-ag-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 || break
                 sleep 2
               done
               kubectl get rolebinding "user-ag-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 \
-                && { echo "beta reach RoleBinding survived re-grant without it"; exit 1; }
+                && { echo "beta reach RoleBinding survived rewrite without it"; exit 1; }
               [ "$(kubectl auth can-i get service/ag-beta -n "$TENANT_NS" --as="$ALICE")" = no ] \
-                || { echo "beta still reachable after re-grant"; exit 1; }
+                || { echo "beta still reachable after rewrite"; exit 1; }
               true
     # The operator removes the slack handle.
-    - name: re-grant-without-the-handle
+    - name: rewrite-without-the-handle
       use:
         template: ../../step-templates/user-command.yaml
         with:
@@ -217,7 +217,7 @@ spec:
               value: operator
             - name: expect
               value: admitted
-    - name: re-grant-without-the-handle-drops-the-binding-key
+    - name: rewrite-without-the-handle-drops-the-binding-key
       try:
         - script:
             timeout: 300s
@@ -235,12 +235,12 @@ spec:
               done
               [ -z "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" \
                 -o jsonpath='{.data.handle\.slack}' 2>/dev/null)" ] \
-                || { echo "handle.slack survived re-grant without it"; exit 1; }
+                || { echo "handle.slack survived rewrite without it"; exit 1; }
               true
     # Reaping an agent deletes its reach Role. Every reach RoleBinding is
-    # owned by that Role, so garbage collection removes the grant, and an
-    # agent recreated under the same name reaches nobody until re-granted.
-    - name: a-recreated-agent-reaches-nobody-until-re-granted
+    # owned by that Role, so garbage collection removes it, and an
+    # agent recreated under the same name reaches nobody until listed again.
+    - name: a-recreated-agent-reaches-nobody-until-listed-again
       try:
         - script:
             timeout: 300s
@@ -265,11 +265,11 @@ spec:
                 --show-only templates/reach-rbac.yaml \
                 | kubectl apply -f - >/dev/null
               [ "$(kubectl auth can-i get service/ag-alpha -n "$TENANT_NS" --as="$ALICE")" = no ] \
-                || { echo "alice reached recreated ag-alpha without a re-grant"; exit 1; }
-              # The re-grant must be written strictly after the new Role.
+                || { echo "alice reached recreated ag-alpha without a rewrite"; exit 1; }
+              # The rewrite must be written strictly after the new Role.
               sleep 1
               true
-    - name: operator-re-grants-alpha
+    - name: operator-relists-alpha
       use:
         template: ../../step-templates/user-command.yaml
         with:
@@ -286,7 +286,7 @@ spec:
               value: operator
             - name: expect
               value: admitted
-    - name: the-re-grant-restores-reach-to-the-new-agent
+    - name: the-rewrite-restores-reach-to-the-new-agent
       try:
         - script:
             timeout: 300s
@@ -306,15 +306,15 @@ spec:
               done
               [ "$(kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" \
                 -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ROLE_UID" ] \
-                || { echo "the re-grant did not bind the recreated ag-alpha-reach"; exit 1; }
+                || { echo "the rewrite did not bind the recreated ag-alpha-reach"; exit 1; }
               [ "$(kubectl auth can-i get service/ag-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
-                || { echo "alice cannot reach ag-alpha after the re-grant"; exit 1; }
+                || { echo "alice cannot reach ag-alpha after the rewrite"; exit 1; }
               true
-    # A grant is judged against the command's write time on every attempt:
+    # A user command is judged against its write time on every attempt:
     # an agent missing at the write, or created after it while the
     # installer retries, is refused, and the refusal leaves alice's existing
-    # grants untouched.
-    - name: operator-grants-a-missing-agent
+    # reach untouched.
+    - name: operator-lists-a-missing-agent
       use:
         template: ../../step-templates/user-command.yaml
         with:
@@ -331,7 +331,7 @@ spec:
               value: operator
             - name: expect
               value: admitted
-    - name: an-agent-created-after-the-grant-is-refused
+    - name: an-agent-created-after-the-command-is-refused
       try:
         - script:
             timeout: 960s
@@ -365,7 +365,7 @@ spec:
               kubectl create service clusterip ag-delta -n "$TENANT_NS" --tcp=9090 >/dev/null
               for i in $(seq 1 420); do
                 kubectl get rolebinding "user-ag-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
-                  && { echo "a retry of $JOB granted ag-$MISSING"; exit 1; }
+                  && { echo "a retry of $JOB bound ag-$MISSING"; exit 1; }
                 [ "$(kubectl get job "$JOB" -n sycophant-system \
                   -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] && break
                 sleep 2
@@ -374,19 +374,19 @@ spec:
                 -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] \
                 || { echo "installer $JOB did not end failed"; exit 1; }
               kubectl get rolebinding "user-ag-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
-                && { echo "a grant to ag-$MISSING rendered"; exit 1; }
-              # The refused grant changed nothing alice already held.
+                && { echo "a binding to ag-$MISSING rendered"; exit 1; }
+              # The refused command changed nothing alice already held.
               [ "$(kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" \
                 -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ALPHA_UID" ] \
-                || { echo "the refused grant removed alice's alpha binding"; exit 1; }
+                || { echo "the refused command removed alice's alpha binding"; exit 1; }
               [ "$(kubectl auth can-i get service/ag-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
-                || { echo "the refused grant cut alice's reach to ag-alpha"; exit 1; }
+                || { echo "the refused command cut alice's reach to ag-alpha"; exit 1; }
               [ "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" -o jsonpath='{.data.agents}' 2>/dev/null)" = alpha ] \
-                || { echo "the refused grant changed alice's identity ConfigMap"; exit 1; }
+                || { echo "the refused command changed alice's identity ConfigMap"; exit 1; }
               kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found --wait=true >/dev/null
               kubectl delete job "$JOB" -n sycophant-system --ignore-not-found >/dev/null
               [ "$(kubectl auth can-i get service/ag-delta -n "$TENANT_NS" --as="$ALICE")" = no ] \
-                || { echo "alice reached ag-delta, created after the grant"; exit 1; }
+                || { echo "alice reached ag-delta, created after the command"; exit 1; }
               true
     # An issuer-prefixed identity holding no write RBAC in this namespace
     # cannot write a shape-valid command, so the denial is RBAC's, not a

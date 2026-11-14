@@ -450,7 +450,7 @@ step_5_app_path_turn() {
   }
   ok "syco whoami answered the bound list (hello-world present)"
 
-  # The same token on an agent it was never granted: the review must deny.
+  # The same token on an agent it cannot reach: the review must deny.
   local denied_cfg
   denied_cfg="$(mktemp -d)"
   cat >"$denied_cfg/config.toml" <<TOML
@@ -459,25 +459,25 @@ profile = "e2e"
 
 [profile.e2e]
 server = "$TAILNET_RELAY_ADDR"
-agent = "not-granted"
+agent = "not-listed"
 TOML
   cp "$SYCO_APP_TMP/credentials.toml" "$denied_cfg/credentials.toml"
 
   local denied
   if denied="$(SYCO_CONFIG_DIR="$denied_cfg" "$REPO_ROOT/target/syco" chat \
     "hello" 2>&1)"; then
-    warn "an ungranted agent was not denied over the app path: ${denied}"
+    warn "an unreachable agent was not denied over the app path: ${denied}"
     rm -rf "$denied_cfg"
     return 1
   fi
   if ! printf '%s' "$denied" | grep \
     -qi 'permission\|denied\|PermissionDenied'; then
-    warn "ungranted agent's chat failed without a denial: ${denied}"
+    warn "unreachable agent's chat failed without a denial: ${denied}"
     rm -rf "$denied_cfg"
     return 1
   fi
   rm -rf "$denied_cfg"
-  ok "Ungranted agent denied over the app path"
+  ok "Unreachable agent denied over the app path"
 
   # A reused cluster keeps earlier runs' records: clear hello-world's
   # conversation so every later read of conversation.log sees only this run's

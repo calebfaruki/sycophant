@@ -269,12 +269,12 @@ async fn a_token_the_apiserver_rejects_resolves_to_no_subject() {
 
 // --- ListAgents answers the watched table -------------------------------
 
-/// ListAgents answers the subject's whole granted list from the watched
+/// ListAgents answers the subject's whole agent list from the watched
 /// identity table. Authentication still costs one TokenReview; no access
 /// review is submitted and nothing is enumerated.
 ///
 /// Answering from Service enumeration (or any cluster-derived source) would
-/// show an agent created after the grant, breaking the created-later
+/// show an agent created after the user command, breaking the created-later
 /// reach rule; authorizing by review would stop the list being a pure table
 /// read.
 #[tokio::test]

@@ -1,5 +1,5 @@
 # The user provision command's data, set by the installer: the subject, its
-# granted agent list, and its channel handle bindings. The chart renders
+# agent list, and its channel handle bindings. The chart renders
 # one reach RoleBinding per listed agent binding the raw subject to that
 # agent's reach Role (every listed agent must already exist), one identity ConfigMap carrying the same data, and
 # the provision-identity membership RoleBinding.

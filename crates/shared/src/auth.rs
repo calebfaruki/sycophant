@@ -214,7 +214,7 @@ pub const CHANNEL_RELAY_AUDIENCE: &str = "channel.relay.sycophant.md";
 /// Build the SubjectAccessReview checking `subject` for `get` on the named
 /// agent's harness Service in the relay's own namespace. The namespace is
 /// the relay's, never a caller-supplied one, so a request naming an agent
-/// outside the tenant namespace finds a Service the caller holds no grant on.
+/// outside the tenant namespace finds a Service the caller cannot reach.
 ///
 /// Pure function — separated from the API call so the spec construction is
 /// unit-testable without a kube client.

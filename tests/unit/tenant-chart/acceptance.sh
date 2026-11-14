@@ -950,7 +950,7 @@ def refuses_missing_agent():
     docs, err = load("user-missing-ag")
     if docs is not None:
         bad(name,
-            "the user chart rendered a grant to agent alpha, which "
+            "the user chart rendered reach to agent alpha, which "
             "does not exist")
     elif "agent alpha does not exist" not in err:
         bad(name,

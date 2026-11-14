@@ -1,5 +1,5 @@
 {{- /*
-The user provision command's data: the issuer-prefixed subject, its granted
+The user provision command's data: the issuer-prefixed subject, its
 agent list, and its channel handle bindings. The installer sets both
 `name` (the subject's sha256 handle) and `command` from the command; the
 handle is recomputed from the subject so the two can never disagree.
@@ -29,21 +29,18 @@ roleRef:
   name: provision-identity
   apiGroup: rbac.authorization.k8s.io
 {{- /* One reach RoleBinding per listed agent, binding the raw subject to
-that agent's reach Role. An agent absent from the list gets no binding,
-so an agent created later grants nobody until the operator re-grants.
-A listed agent must exist and be older than the command: a missing reach
-Role, or one created at or after the command's write time, fails the install,
-so the command grants nothing on any attempt. Each binding is owned by the Role it binds (by uid),
-so reaping the agent garbage-collects every grant to it, and an agent
-recreated under the same name reaches nobody until re-granted. */ -}}
+that agent's reach Role. A listed agent must exist and be older than the
+command, or the install fails and binds nothing. Each binding is owned by the
+Role it binds (by uid), so reaping the agent deletes it, and an agent
+recreated under the same name reaches nobody until a new user command lists it. */ -}}
 {{- range $agent := $agents }}
 {{- if ne $agent "" }}
 {{- $role := lookup "rbac.authorization.k8s.io/v1" "Role" $.Release.Namespace (printf "ag-%s-reach" $agent) }}
 {{- if not $role }}
-{{- fail (printf "agent %s does not exist in %s; create it before granting it" $agent $.Release.Namespace) }}
+{{- fail (printf "agent %s does not exist in %s; create it before listing it" $agent $.Release.Namespace) }}
 {{- end }}
 {{- if not (and $.Values.commandCreated (lt $role.metadata.creationTimestamp $.Values.commandCreated)) }}
-{{- fail (printf "agent %s was created after this grant was written; grant it again" $agent) }}
+{{- fail (printf "agent %s was created after this user command was written; write it again" $agent) }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

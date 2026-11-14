@@ -24,7 +24,7 @@ Most agent frameworks are built for capability, not containment. Isolation is so
 
 Hosted platforms take the other extreme. The model, your data, and the agent all live on their infrastructure. You get controls, but they are settings on machines you do not own, backed by promises you have to trust.
 
-Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to the people you grant, and to their bound chat handles. Containment is the default, not an add-on.
+Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to the people you list, and to their bound chat handles. Containment is the default, not an add-on.
 
 ## What a compromised agent can't do
 
