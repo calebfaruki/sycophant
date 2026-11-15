@@ -8,6 +8,32 @@ pub mod sycophant {
 
 pub use sycophant::common::v1::*;
 
+impl Sender {
+    pub fn person(subject: impl Into<String>) -> Self {
+        Self {
+            from: Some(sender::From::Person(subject.into())),
+        }
+    }
+
+    pub fn sub_agent(path: impl Into<String>) -> Self {
+        Self {
+            from: Some(sender::From::SubAgent(path.into())),
+        }
+    }
+
+    pub fn parent_agent(agent: impl Into<String>) -> Self {
+        Self {
+            from: Some(sender::From::ParentAgent(agent.into())),
+        }
+    }
+
+    pub fn sycophant() -> Self {
+        Self {
+            from: Some(sender::From::Sycophant(true)),
+        }
+    }
+}
+
 /// Build a text content part. Every tool producer that answers with plain text
 /// wraps its string here so a text answer is a one-element content-part list.
 pub fn text_block(text: String) -> ContentBlock {

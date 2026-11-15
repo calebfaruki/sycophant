@@ -28,6 +28,10 @@ const (
 	RelayGateway_TakeBackMessage_FullMethodName        = "/relay.v1.RelayGateway/TakeBackMessage"
 	RelayGateway_ClearContext_FullMethodName           = "/relay.v1.RelayGateway/ClearContext"
 	RelayGateway_CompactContext_FullMethodName         = "/relay.v1.RelayGateway/CompactContext"
+	RelayGateway_ListSubAgents_FullMethodName          = "/relay.v1.RelayGateway/ListSubAgents"
+	RelayGateway_ReadSubAgentLog_FullMethodName        = "/relay.v1.RelayGateway/ReadSubAgentLog"
+	RelayGateway_MessageSubAgent_FullMethodName        = "/relay.v1.RelayGateway/MessageSubAgent"
+	RelayGateway_StopSubAgent_FullMethodName           = "/relay.v1.RelayGateway/StopSubAgent"
 	RelayGateway_ChannelStreamIngest_FullMethodName    = "/relay.v1.RelayGateway/ChannelStreamIngest"
 	RelayGateway_ChannelStreamReceive_FullMethodName   = "/relay.v1.RelayGateway/ChannelStreamReceive"
 	RelayGateway_WatchTools_FullMethodName             = "/relay.v1.RelayGateway/WatchTools"
@@ -48,6 +52,10 @@ type RelayGatewayClient interface {
 	TakeBackMessage(ctx context.Context, in *v1.TakeBackMessageRequest, opts ...grpc.CallOption) (*v1.TakeBackMessageResponse, error)
 	ClearContext(ctx context.Context, in *v1.ClearContextRequest, opts ...grpc.CallOption) (*v1.ClearContextResponse, error)
 	CompactContext(ctx context.Context, in *v1.CompactContextRequest, opts ...grpc.CallOption) (*v1.CompactContextResponse, error)
+	ListSubAgents(ctx context.Context, in *v1.ListSubAgentsRequest, opts ...grpc.CallOption) (*v1.ListSubAgentsResponse, error)
+	ReadSubAgentLog(ctx context.Context, in *v1.ReadSubAgentLogRequest, opts ...grpc.CallOption) (*v1.GetConversationHistoryResponse, error)
+	MessageSubAgent(ctx context.Context, in *v1.MessageSubAgentRequest, opts ...grpc.CallOption) (*v1.MessageSubAgentResponse, error)
+	StopSubAgent(ctx context.Context, in *v1.StopSubAgentRequest, opts ...grpc.CallOption) (*v1.StopSubAgentResponse, error)
 	ChannelStreamIngest(ctx context.Context, in *v1.ChannelStreamIngestRequest, opts ...grpc.CallOption) (*v1.ChannelStreamIngestAck, error)
 	ChannelStreamReceive(ctx context.Context, in *v1.ChannelStreamReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelStreamOutbound], error)
 	WatchTools(ctx context.Context, in *v1.WatchToolsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ToolListUpdate], error)
@@ -144,6 +152,46 @@ func (c *relayGatewayClient) CompactContext(ctx context.Context, in *v1.CompactC
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(v1.CompactContextResponse)
 	err := c.cc.Invoke(ctx, RelayGateway_CompactContext_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) ListSubAgents(ctx context.Context, in *v1.ListSubAgentsRequest, opts ...grpc.CallOption) (*v1.ListSubAgentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ListSubAgentsResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_ListSubAgents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) ReadSubAgentLog(ctx context.Context, in *v1.ReadSubAgentLogRequest, opts ...grpc.CallOption) (*v1.GetConversationHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.GetConversationHistoryResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_ReadSubAgentLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) MessageSubAgent(ctx context.Context, in *v1.MessageSubAgentRequest, opts ...grpc.CallOption) (*v1.MessageSubAgentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.MessageSubAgentResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_MessageSubAgent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayGatewayClient) StopSubAgent(ctx context.Context, in *v1.StopSubAgentRequest, opts ...grpc.CallOption) (*v1.StopSubAgentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.StopSubAgentResponse)
+	err := c.cc.Invoke(ctx, RelayGateway_StopSubAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +297,10 @@ type RelayGatewayServer interface {
 	TakeBackMessage(context.Context, *v1.TakeBackMessageRequest) (*v1.TakeBackMessageResponse, error)
 	ClearContext(context.Context, *v1.ClearContextRequest) (*v1.ClearContextResponse, error)
 	CompactContext(context.Context, *v1.CompactContextRequest) (*v1.CompactContextResponse, error)
+	ListSubAgents(context.Context, *v1.ListSubAgentsRequest) (*v1.ListSubAgentsResponse, error)
+	ReadSubAgentLog(context.Context, *v1.ReadSubAgentLogRequest) (*v1.GetConversationHistoryResponse, error)
+	MessageSubAgent(context.Context, *v1.MessageSubAgentRequest) (*v1.MessageSubAgentResponse, error)
+	StopSubAgent(context.Context, *v1.StopSubAgentRequest) (*v1.StopSubAgentResponse, error)
 	ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error)
 	ChannelStreamReceive(*v1.ChannelStreamReceiveRequest, grpc.ServerStreamingServer[v1.ChannelStreamOutbound]) error
 	WatchTools(*v1.WatchToolsRequest, grpc.ServerStreamingServer[v1.ToolListUpdate]) error
@@ -294,6 +346,18 @@ func (UnimplementedRelayGatewayServer) ClearContext(context.Context, *v1.ClearCo
 }
 func (UnimplementedRelayGatewayServer) CompactContext(context.Context, *v1.CompactContextRequest) (*v1.CompactContextResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompactContext not implemented")
+}
+func (UnimplementedRelayGatewayServer) ListSubAgents(context.Context, *v1.ListSubAgentsRequest) (*v1.ListSubAgentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSubAgents not implemented")
+}
+func (UnimplementedRelayGatewayServer) ReadSubAgentLog(context.Context, *v1.ReadSubAgentLogRequest) (*v1.GetConversationHistoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadSubAgentLog not implemented")
+}
+func (UnimplementedRelayGatewayServer) MessageSubAgent(context.Context, *v1.MessageSubAgentRequest) (*v1.MessageSubAgentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MessageSubAgent not implemented")
+}
+func (UnimplementedRelayGatewayServer) StopSubAgent(context.Context, *v1.StopSubAgentRequest) (*v1.StopSubAgentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StopSubAgent not implemented")
 }
 func (UnimplementedRelayGatewayServer) ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error) {
 	return nil, status.Error(codes.Unimplemented, "method ChannelStreamIngest not implemented")
@@ -478,6 +542,78 @@ func _RelayGateway_CompactContext_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayGateway_ListSubAgents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.ListSubAgentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).ListSubAgents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_ListSubAgents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).ListSubAgents(ctx, req.(*v1.ListSubAgentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_ReadSubAgentLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.ReadSubAgentLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).ReadSubAgentLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_ReadSubAgentLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).ReadSubAgentLog(ctx, req.(*v1.ReadSubAgentLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_MessageSubAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.MessageSubAgentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).MessageSubAgent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_MessageSubAgent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).MessageSubAgent(ctx, req.(*v1.MessageSubAgentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayGateway_StopSubAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.StopSubAgentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayGatewayServer).StopSubAgent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayGateway_StopSubAgent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayGatewayServer).StopSubAgent(ctx, req.(*v1.StopSubAgentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RelayGateway_ChannelStreamIngest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ChannelStreamIngestRequest)
 	if err := dec(in); err != nil {
@@ -605,6 +741,22 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RelayGateway_CompactContext_Handler,
 		},
 		{
+			MethodName: "ListSubAgents",
+			Handler:    _RelayGateway_ListSubAgents_Handler,
+		},
+		{
+			MethodName: "ReadSubAgentLog",
+			Handler:    _RelayGateway_ReadSubAgentLog_Handler,
+		},
+		{
+			MethodName: "MessageSubAgent",
+			Handler:    _RelayGateway_MessageSubAgent_Handler,
+		},
+		{
+			MethodName: "StopSubAgent",
+			Handler:    _RelayGateway_StopSubAgent_Handler,
+		},
+		{
 			MethodName: "ChannelStreamIngest",
 			Handler:    _RelayGateway_ChannelStreamIngest_Handler,
 		},
@@ -644,6 +796,7 @@ const (
 	RelayInternal_DeliverReply_FullMethodName              = "/relay.v1.RelayInternal/DeliverReply"
 	RelayInternal_DeliverTurnState_FullMethodName          = "/relay.v1.RelayInternal/DeliverTurnState"
 	RelayInternal_DeliverStreamItem_FullMethodName         = "/relay.v1.RelayInternal/DeliverStreamItem"
+	RelayInternal_DeliverSubAgentEvent_FullMethodName      = "/relay.v1.RelayInternal/DeliverSubAgentEvent"
 )
 
 // RelayInternalClient is the client API for RelayInternal service.
@@ -661,6 +814,9 @@ type RelayInternalClient interface {
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
 	// ChannelStreamOutbound and relays it unchanged (no payload inspection).
 	DeliverStreamItem(ctx context.Context, in *DeliverStreamItemRequest, opts ...grpc.CallOption) (*DeliverStreamItemResponse, error)
+	// The harness pushes one sub-agent event. The relay sends it unchanged to
+	// every channel stream of the agent.
+	DeliverSubAgentEvent(ctx context.Context, in *DeliverSubAgentEventRequest, opts ...grpc.CallOption) (*DeliverSubAgentEventResponse, error)
 }
 
 type relayInternalClient struct {
@@ -740,6 +896,16 @@ func (c *relayInternalClient) DeliverStreamItem(ctx context.Context, in *Deliver
 	return out, nil
 }
 
+func (c *relayInternalClient) DeliverSubAgentEvent(ctx context.Context, in *DeliverSubAgentEventRequest, opts ...grpc.CallOption) (*DeliverSubAgentEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliverSubAgentEventResponse)
+	err := c.cc.Invoke(ctx, RelayInternal_DeliverSubAgentEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RelayInternalServer is the server API for RelayInternal service.
 // All implementations must embed UnimplementedRelayInternalServer
 // for forward compatibility.
@@ -755,6 +921,9 @@ type RelayInternalServer interface {
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
 	// ChannelStreamOutbound and relays it unchanged (no payload inspection).
 	DeliverStreamItem(context.Context, *DeliverStreamItemRequest) (*DeliverStreamItemResponse, error)
+	// The harness pushes one sub-agent event. The relay sends it unchanged to
+	// every channel stream of the agent.
+	DeliverSubAgentEvent(context.Context, *DeliverSubAgentEventRequest) (*DeliverSubAgentEventResponse, error)
 	mustEmbedUnimplementedRelayInternalServer()
 }
 
@@ -782,6 +951,9 @@ func (UnimplementedRelayInternalServer) DeliverTurnState(context.Context, *Deliv
 }
 func (UnimplementedRelayInternalServer) DeliverStreamItem(context.Context, *DeliverStreamItemRequest) (*DeliverStreamItemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeliverStreamItem not implemented")
+}
+func (UnimplementedRelayInternalServer) DeliverSubAgentEvent(context.Context, *DeliverSubAgentEventRequest) (*DeliverSubAgentEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeliverSubAgentEvent not implemented")
 }
 func (UnimplementedRelayInternalServer) mustEmbedUnimplementedRelayInternalServer() {}
 func (UnimplementedRelayInternalServer) testEmbeddedByValue()                       {}
@@ -905,6 +1077,24 @@ func _RelayInternal_DeliverStreamItem_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayInternal_DeliverSubAgentEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliverSubAgentEventRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayInternalServer).DeliverSubAgentEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayInternal_DeliverSubAgentEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayInternalServer).DeliverSubAgentEvent(ctx, req.(*DeliverSubAgentEventRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RelayInternal_ServiceDesc is the grpc.ServiceDesc for RelayInternal service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -931,6 +1121,10 @@ var RelayInternal_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeliverStreamItem",
 			Handler:    _RelayInternal_DeliverStreamItem_Handler,
+		},
+		{
+			MethodName: "DeliverSubAgentEvent",
+			Handler:    _RelayInternal_DeliverSubAgentEvent_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -8,8 +8,10 @@ use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
     CancelTurnRequest, CancelTurnResponse, ClearContextRequest, ClearContextResponse,
     CompactContextRequest, CompactContextResponse, DispatchToolResponse,
-    GetConversationHistoryRequest, GetConversationHistoryResponse, TakeBackMessageRequest,
-    TakeBackMessageResponse, ToolListUpdate, ToolResultFrame, WatchToolsRequest,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, ListSubAgentsRequest,
+    ListSubAgentsResponse, MessageSubAgentRequest, MessageSubAgentResponse, ReadSubAgentLogRequest,
+    StopSubAgentRequest, StopSubAgentResponse, TakeBackMessageRequest, TakeBackMessageResponse,
+    ToolListUpdate, ToolResultFrame, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -19,8 +21,9 @@ use tonic::{Request, Response, Status};
 pub(crate) const MOCK_CALL_ID: &str = "call-42";
 
 /// The tool forwarders, `get_conversation_history`, `take_back_message`,
-/// `clear_context` and `compact_context` record the request they were handed, so a test can assert what the relay
-/// passed through; `watch_tools` and `await_tool_result` stream whatever the
+/// `clear_context`, `compact_context` and the four sub-agent commands record
+/// the request they were handed, so a test can assert what the relay passed
+/// through; `watch_tools` and `await_tool_result` stream whatever the
 /// test sends on the matching channel. Every other method is unimplemented, so
 /// a test that reaches one has escaped the check it meant to exercise and fails
 /// on the wrong status.
@@ -35,6 +38,12 @@ pub(crate) struct MockHarness {
     pub(crate) seen_take_back: Arc<Mutex<Option<TakeBackMessageRequest>>>,
     pub(crate) seen_clear: Arc<Mutex<Option<ClearContextRequest>>>,
     pub(crate) seen_compact: Arc<Mutex<Option<CompactContextRequest>>>,
+    pub(crate) seen_list_sub_agents: Arc<Mutex<Option<ListSubAgentsRequest>>>,
+    pub(crate) seen_read_sub_agent_log: Arc<Mutex<Option<ReadSubAgentLogRequest>>>,
+    pub(crate) seen_message_sub_agent: Arc<Mutex<Option<MessageSubAgentRequest>>>,
+    pub(crate) seen_stop_sub_agent: Arc<Mutex<Option<StopSubAgentRequest>>>,
+    pub(crate) sub_agents: ListSubAgentsResponse,
+    pub(crate) sub_agent_log: GetConversationHistoryResponse,
 }
 
 /// Take the stream a test armed, or refuse when it armed none.
@@ -115,6 +124,38 @@ impl HarnessControl for MockHarness {
     ) -> Result<Response<CompactContextResponse>, Status> {
         *self.seen_compact.lock().unwrap() = Some(request.into_inner());
         Ok(Response::new(CompactContextResponse {}))
+    }
+
+    async fn list_sub_agents(
+        &self,
+        request: Request<ListSubAgentsRequest>,
+    ) -> Result<Response<ListSubAgentsResponse>, Status> {
+        *self.seen_list_sub_agents.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(self.sub_agents.clone()))
+    }
+
+    async fn read_sub_agent_log(
+        &self,
+        request: Request<ReadSubAgentLogRequest>,
+    ) -> Result<Response<GetConversationHistoryResponse>, Status> {
+        *self.seen_read_sub_agent_log.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(self.sub_agent_log.clone()))
+    }
+
+    async fn message_sub_agent(
+        &self,
+        request: Request<MessageSubAgentRequest>,
+    ) -> Result<Response<MessageSubAgentResponse>, Status> {
+        *self.seen_message_sub_agent.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(MessageSubAgentResponse {}))
+    }
+
+    async fn stop_sub_agent(
+        &self,
+        request: Request<StopSubAgentRequest>,
+    ) -> Result<Response<StopSubAgentResponse>, Status> {
+        *self.seen_stop_sub_agent.lock().unwrap() = Some(request.into_inner());
+        Ok(Response::new(StopSubAgentResponse {}))
     }
 
     async fn cancel_turn(

@@ -52,12 +52,20 @@ service HarnessControl {
   // running turn's message.
   rpc TakeBackMessage (sycophant.common.v1.TakeBackMessageRequest) returns (sycophant.common.v1.TakeBackMessageResponse);
 
-  // Empty the conversation log in place; a clear makes no archive.
+  // Cut the conversation log in place to one clear entry; a clear makes no
+  // archive.
   rpc ClearContext (sycophant.common.v1.ClearContextRequest) returns (sycophant.common.v1.ClearContextResponse);
 
   // Summarize the current window with the agent's model, rotate the
   // conversation log, and start the new window with the summary.
   rpc CompactContext (sycophant.common.v1.CompactContextRequest) returns (sycophant.common.v1.CompactContextResponse);
+
+  // --- The agent's sub-agents ---
+
+  rpc ListSubAgents (sycophant.common.v1.ListSubAgentsRequest) returns (sycophant.common.v1.ListSubAgentsResponse);
+  rpc ReadSubAgentLog (sycophant.common.v1.ReadSubAgentLogRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
+  rpc MessageSubAgent (sycophant.common.v1.MessageSubAgentRequest) returns (sycophant.common.v1.MessageSubAgentResponse);
+  rpc StopSubAgent (sycophant.common.v1.StopSubAgentRequest) returns (sycophant.common.v1.StopSubAgentResponse);
 }
 
 // --- Dispatch link ---
@@ -73,6 +81,8 @@ message DispatchFrame {
   oneof frame {
     sycophant.common.v1.SendServerRequestAndAwaitRequest request = 1;
     string final_answer = 2;
+    // Why the sub-agent's turn ended with no answer.
+    string failure = 3;
   }
 }
 
@@ -81,8 +91,14 @@ message ParentFrame {
     sycophant.common.v1.SendServerRequestAndAwaitResponse response = 1;
     bool answer_taken = 2;
     // A message for the sub-agent's running turn.
-    string message = 3;
+    SubAgentMessage message = 5;
     // End the sub-agent's harness.
     bool stop = 4;
   }
+  reserved 3;
+}
+
+message SubAgentMessage {
+  string text = 1;
+  sycophant.common.v1.Sender sender = 2;
 }

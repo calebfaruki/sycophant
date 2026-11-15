@@ -141,11 +141,18 @@ type takeBackMsg struct {
 	err   error
 }
 
-// contextMsg is the outcome of /clear or /compact: notice when it ran, err
-// when it or the reload after it failed.
+// contextMsg is the outcome of /clear or /compact: notice and entries for
+// the reset an entry frame brings, err when the command or the reload failed.
 type contextMsg struct {
 	notice  string
 	entries []*commonpb.HistoryEntry
+	err     error
+}
+
+// subAgentMsg is the outcome of a sub-agent command: the rows it shows, or
+// err.
+type subAgentMsg struct {
+	notices []string
 	err     error
 }
 
@@ -427,16 +434,14 @@ func (m *tuiModel) historyCmd(gen int) tea.Cmd {
 	}
 }
 
-// contextCmd runs /clear or /compact and then reads the conversation it
-// leaves.
+// contextCmd sends /clear or /compact. Its reset comes with the entry frame
+// the relay sends.
 func (m *tuiModel) contextCmd(command string) tea.Cmd {
 	client, agent, token := m.client, m.profile.Agent, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
 		var err error
-		notice := "context cleared"
 		if command == "/compact" {
-			notice = "context compacted"
 			_, err = client.CompactContext(ctx, &commonpb.CompactContextRequest{Agent: agent})
 		} else {
 			_, err = client.ClearContext(ctx, &commonpb.ClearContextRequest{Agent: agent})
@@ -444,8 +449,70 @@ func (m *tuiModel) contextCmd(command string) tea.Cmd {
 		if err != nil {
 			return contextMsg{err: fmt.Errorf("%s: %s", command, connReason(err))}
 		}
-		entries, err := loadHistory(ctx, client, agent)
+		return nil
+	}
+}
+
+// resetCmd reads the conversation a clear or compact left and shows it
+// under notice.
+func (m *tuiModel) resetCmd(notice string) tea.Cmd {
+	client, agent, token := m.client, m.profile.Agent, m.token
+	return func() tea.Msg {
+		entries, err := loadHistory(grpcclient.WithToken(context.Background(), token), client, agent)
 		return contextMsg{notice: notice, entries: entries, err: err}
+	}
+}
+
+var subAgentUsage = map[string]string{
+	"/subagents": "/subagents",
+	"/log":       "/log <path>",
+	"/msg":       "/msg <path> <text>",
+	"/stop":      "/stop <path>",
+}
+
+// subAgentCmd sends /subagents, /log, /msg or /stop.
+func (m *tuiModel) subAgentCmd(command, path, text string) tea.Cmd {
+	client, agent, token := m.client, m.profile.Agent, m.token
+	return func() tea.Msg {
+		if (command != "/subagents" && path == "") || (command == "/msg" && text == "") {
+			return subAgentMsg{err: fmt.Errorf("usage: %s", subAgentUsage[command])}
+		}
+		ctx := grpcclient.WithToken(context.Background(), token)
+		var notices []string
+		var err error
+		switch command {
+		case "/subagents":
+			var resp *commonpb.ListSubAgentsResponse
+			if resp, err = client.ListSubAgents(ctx, &commonpb.ListSubAgentsRequest{Agent: agent}); err == nil {
+				notices = []string{"sub-agents: none"}
+				if len(resp.GetPaths()) > 0 {
+					notices = []string{"sub-agents: " + strings.Join(resp.GetPaths(), ", ")}
+				}
+			}
+		case "/log":
+			var resp *commonpb.GetConversationHistoryResponse
+			if resp, err = client.ReadSubAgentLog(ctx, &commonpb.ReadSubAgentLogRequest{Agent: agent, Path: path}); err == nil {
+				notices = []string{"log of " + path}
+				for _, e := range resp.GetEntries() {
+					if t := oneLine(entryText(e.GetMessage().GetContent())); t != "" {
+						if label := senderLabel(e.GetSender()); label != "" {
+							t = label + ": " + t
+						}
+						notices = append(notices, t)
+					}
+				}
+			}
+		case "/msg":
+			if _, err = client.MessageSubAgent(ctx, &commonpb.MessageSubAgentRequest{Agent: agent, Path: path, Text: text}); err == nil {
+				notices = []string{"message sent to " + path}
+			}
+		case "/stop":
+			_, err = client.StopSubAgent(ctx, &commonpb.StopSubAgentRequest{Agent: agent, Path: path})
+		}
+		if err != nil {
+			return subAgentMsg{err: fmt.Errorf("%s: %s", command, connReason(err))}
+		}
+		return subAgentMsg{notices: notices}
 	}
 }
 
@@ -568,7 +635,12 @@ func (m *tuiModel) selectAgent(agent string) (tea.Model, tea.Cmd) {
 	m.phase = phaseChat
 	m.input.SetWidth(inputWidth(m.panelWidth()))
 	m.input.Focus()
-	return m, tea.Batch(textarea.Blink, m.connectCmd())
+	cmds := []tea.Cmd{textarea.Blink, m.connectCmd()}
+	if m.width > 0 {
+		size := tea.WindowSizeMsg{Width: m.width, Height: m.height}
+		cmds = append(cmds, func() tea.Msg { return size })
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // --- Chat Update ---
@@ -735,6 +807,12 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.contextCmd(text))
 				break
 			}
+			command, rest, _ := strings.Cut(text, " ")
+			if _, ok := subAgentUsage[command]; ok {
+				path, body, _ := strings.Cut(strings.TrimSpace(rest), " ")
+				cmds = append(cmds, m.subAgentCmd(command, path, strings.TrimSpace(body)))
+				break
+			}
 			cmds = append(cmds, m.sendMessage(text))
 		}
 
@@ -815,6 +893,16 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textBuf.Reset()
 			m.renderHistory(msg.entries)
 			m.commitNotice(statusStyle.Render(msg.notice))
+		}
+		if msg.err != nil {
+			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+		}
+		m.syncViewport()
+
+	case subAgentMsg:
+		m.started = true
+		for _, n := range msg.notices {
+			m.commitNotice(statusStyle.Render(n))
 		}
 		if msg.err != nil {
 			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
@@ -904,6 +992,24 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) tea.Cmd
 		if a, ok := toolApprovalOf(c.ServerRequest); ok {
 			m.approvals = append(m.approvals, a)
 		}
+	case *commonpb.ChannelStreamOutbound_SendMessage:
+		switch c.SendMessage.GetKind() {
+		case commonpb.EntryKind_ENTRY_KIND_CLEAR:
+			return m.resetCmd("context cleared")
+		case commonpb.EntryKind_ENTRY_KIND_COMPACT:
+			return m.resetCmd("context compacted")
+		}
+	case *commonpb.ChannelStreamOutbound_SubAgentStarted:
+		m.commitNotice(statusStyle.Render("sub-agent " + c.SubAgentStarted.GetPath() + " started"))
+	case *commonpb.ChannelStreamOutbound_SubAgentFinished:
+		f := c.SubAgentFinished
+		if failure, ok := f.GetOutcome().(*commonpb.SubAgentFinished_Failure); ok {
+			m.commitNotice(errorStyle.Render("⚠ sub-agent " + f.GetPath() + " failed: " + oneLine(failure.Failure)))
+		} else {
+			m.commitNotice(statusStyle.Render("sub-agent " + f.GetPath() + " finished: " + oneLine(f.GetAnswer())))
+		}
+	case *commonpb.ChannelStreamOutbound_SubAgentStopped:
+		m.commitNotice(statusStyle.Render("sub-agent " + c.SubAgentStopped.GetPath() + " stopped"))
 	}
 	return nil
 }
@@ -955,6 +1061,7 @@ const (
 type transcriptPart struct {
 	kind       partKind
 	text       string
+	label      string
 	tool       *toolRow
 	drawn      string
 	drawnWidth int
@@ -964,7 +1071,7 @@ func (p *transcriptPart) render(width int) string {
 	indent := strings.Repeat(" ", replyIndent)
 	switch p.kind {
 	case partUser:
-		return messagePanel(p.text, width)
+		return messagePanel(p.text, p.label, width)
 	case partReply:
 		if p.drawnWidth != width || p.drawn == "" {
 			p.drawn, p.drawnWidth = renderReply(p.text, width), width
@@ -977,16 +1084,31 @@ func (p *transcriptPart) render(width int) string {
 	}
 }
 
-func messagePanel(text string, width int) string {
+// messagePanel draws a sent message, with label on its bottom row.
+func messagePanel(text, label string, width int) string {
 	w := inputWidth(width)
 	rows := append([]string{""}, strings.Split(ansi.Wrap(text, w, ""), "\n")...)
-	rows = append(rows, "")
 	bar := panelBar(panelAccent)
-	out := make([]string, len(rows))
+	out := make([]string, len(rows), len(rows)+1)
 	for i, r := range rows {
 		out[i] = panelRow(bar, panelFill.Render(r), width)
 	}
+	out = append(out, panelRow(bar, panelDim.Render(label), width))
 	return strings.Join(out, "\n")
+}
+
+func senderLabel(s *commonpb.Sender) string {
+	switch s.GetFrom().(type) {
+	case *commonpb.Sender_Person:
+		return "person"
+	case *commonpb.Sender_SubAgent:
+		return "sub-agent"
+	case *commonpb.Sender_ParentAgent:
+		return "parent agent"
+	case *commonpb.Sender_Sycophant:
+		return "sycophant"
+	}
+	return ""
 }
 
 // replyStyle is glamour's dark style with the document's margin set to
@@ -1068,18 +1190,18 @@ func (m *tuiModel) flushStreamingToCommitted() {
 }
 
 // renderHistory commits a conversation's history: user and assistant text
-// and the assistant's tool calls. Tool results and non-text blocks are not
-// shown.
+// and the assistant's tool calls. Tool results, non-text blocks and clear
+// and compact entries are not shown.
 func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
 	for _, e := range entries {
 		msg := e.GetMessage()
-		if msg == nil {
+		if msg == nil || e.GetKind() != commonpb.EntryKind_ENTRY_KIND_MESSAGE {
 			continue
 		}
 		switch msg.GetRole() {
 		case "user":
 			m.started = true
-			m.transcript = append(m.transcript, transcriptPart{kind: partUser, text: entryText(msg.GetContent())})
+			m.transcript = append(m.transcript, transcriptPart{kind: partUser, text: entryText(msg.GetContent()), label: senderLabel(e.GetSender())})
 		case "assistant":
 			if text := entryText(msg.GetContent()); text != "" {
 				m.commitAssistant(text)

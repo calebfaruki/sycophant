@@ -1,9 +1,13 @@
 use proto_common::{
-    ContentBlock, SendServerNotificationRequest, SendServerRequestAndAwaitRequest,
+    ContentBlock, EntryKind, SendServerNotificationRequest, SendServerRequestAndAwaitRequest,
     SendServerRequestAndAwaitResponse, StreamItem, SubscribeRequest, TurnStateEvent, UserMessage,
 };
+use relay_proto::deliver_sub_agent_event_request::Event as SubAgentEvent;
 use relay_proto::relay_internal_client::RelayInternalClient;
-use relay_proto::{DeliverReplyRequest, DeliverStreamItemRequest, DeliverTurnStateRequest};
+use relay_proto::{
+    DeliverReplyRequest, DeliverStreamItemRequest, DeliverSubAgentEventRequest,
+    DeliverTurnStateRequest,
+};
 use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -80,8 +84,14 @@ pub(crate) trait RelayRpc: Send {
     /// Push one streamed activity frame produced during a turn; the gateway
     /// relays it unchanged. Returns the gateway's best-effort `delivered` bool.
     async fn deliver_stream_item(&mut self, item: StreamItem) -> Result<bool, String>;
-    /// Push the assistant reply (ChannelStreamSend).
-    async fn deliver_reply(&mut self, content: Vec<ContentBlock>) -> Result<bool, String>;
+    /// Push the assistant reply, or a clear or compact entry (ChannelStreamSend).
+    async fn deliver_reply(
+        &mut self,
+        kind: EntryKind,
+        content: Vec<ContentBlock>,
+    ) -> Result<bool, String>;
+    /// Push a sub-agent started, finished or stopped event.
+    async fn deliver_sub_agent_event(&mut self, event: SubAgentEvent) -> Result<bool, String>;
     /// Push a turn-state event; the relay records it as the agent's turn state.
     async fn deliver_turn_state(&mut self, turn_state: TurnStateEvent) -> Result<bool, String>;
 }
@@ -164,12 +174,29 @@ impl RelayRpc for RelayClient {
         Ok(resp.delivered)
     }
 
-    async fn deliver_reply(&mut self, content: Vec<ContentBlock>) -> Result<bool, String> {
+    async fn deliver_reply(
+        &mut self,
+        kind: EntryKind,
+        content: Vec<ContentBlock>,
+    ) -> Result<bool, String> {
         let resp = self
             .inner
-            .deliver_reply(DeliverReplyRequest { content })
+            .deliver_reply(DeliverReplyRequest {
+                content,
+                kind: kind.into(),
+            })
             .await
             .map_err(|e| format!("deliver_reply RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
+    }
+
+    async fn deliver_sub_agent_event(&mut self, event: SubAgentEvent) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .deliver_sub_agent_event(DeliverSubAgentEventRequest { event: Some(event) })
+            .await
+            .map_err(|e| format!("deliver_sub_agent_event RPC failed: {e}"))?
             .into_inner();
         Ok(resp.delivered)
     }

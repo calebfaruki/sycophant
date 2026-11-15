@@ -104,7 +104,7 @@ pub(crate) async fn message_loop(
             let message_id = item.message_id;
             let reply_channel_stream = item.reply_channel_stream;
             tracing::info!(
-                sender = %item.sender,
+                sender = ?item.sender,
                 message_id = %message_id,
                 reply_channel_stream = ?reply_channel_stream,
                 "turn start"
@@ -127,7 +127,7 @@ pub(crate) async fn message_loop(
             };
             log.write()
                 .await
-                .append(user_msg)
+                .append_user(user_msg, item.sender)
                 .await
                 .map_err(|e| format!("append user message: {e}"))?;
             let history: Vec<Message> = log.read().await.history_for_provider();
@@ -283,7 +283,10 @@ async fn deliver_turn_outcome(
     // Deliver reply first (if any), then turn-state — preserving ordering.
     if let Some(content) = reply {
         tracing::info!(message_id = %message_id, "delivering reply to relay");
-        if let Err(e) = relay.deliver_reply(content).await {
+        if let Err(e) = relay
+            .deliver_reply(proto_common::EntryKind::Message, content)
+            .await
+        {
             tracing::warn!(error = %e, "failed to deliver reply to client");
         } else {
             tracing::info!(message_id = %message_id, "reply delivered to relay");
@@ -610,7 +613,7 @@ mod tests {
         crate::message_source::InboundMessage {
             content: proto_common::text_content(text),
             reply_channel_stream: Some(format!("chan-{sender}")),
-            sender: sender.to_string(),
+            sender: proto_common::Sender::person(sender),
             message_id: format!("mid-{text}"),
         }
     }
@@ -663,7 +666,17 @@ mod tests {
         ) -> Result<bool, String> {
             Ok(true)
         }
-        async fn deliver_reply(&mut self, _content: Vec<ContentBlock>) -> Result<bool, String> {
+        async fn deliver_reply(
+            &mut self,
+            _kind: proto_common::EntryKind,
+            _content: Vec<ContentBlock>,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+        async fn deliver_sub_agent_event(
+            &mut self,
+            _event: relay_proto::deliver_sub_agent_event_request::Event,
+        ) -> Result<bool, String> {
             Ok(true)
         }
         async fn deliver_turn_state(&mut self, turn_state: TurnStateEvent) -> Result<bool, String> {
@@ -697,7 +710,7 @@ mod tests {
         let (tx, mut source) = channel_source();
         let pulled = source.pulled.clone();
 
-        let run = run_message_loop(&mut inference, &mut relay, &mut source, agent_state);
+        let run = run_message_loop(&mut inference, &mut relay, &mut source, agent_state.clone());
         let starts = || started.lock().unwrap().len();
         let users_of = |turn: usize| started.lock().unwrap()[turn].clone();
         let drive = async {
@@ -733,6 +746,22 @@ mod tests {
                     "turn {n} adds exactly the oldest queued message"
                 );
             }
+            let senders: Vec<_> = agent_state
+                .log()
+                .read()
+                .await
+                .snapshot(None)
+                .entries
+                .into_iter()
+                .filter(|e| e.message.role == "user")
+                .map(|e| e.sender)
+                .collect();
+            let from = |who: &str| Some(proto_common::Sender::person(who));
+            assert_eq!(
+                senders,
+                [from("alice"), from("bob"), from("alice"), from("bob")],
+                "each turn writes its message with the person who sent it"
+            );
         };
         tokio::select! {
             res = run => panic!("the message loop ended: {res:?}"),

@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use proto_common::{content_block, image_block, text_content, ContentBlock, Message, ToolCall};
+use proto_common::{
+    content_block, image_block, text_content, ContentBlock, EntryKind, Message, Sender, ToolCall,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -403,6 +405,14 @@ pub(crate) struct LogEntry {
     pub(crate) system_prompt_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sender: Option<Sender>,
+    #[serde(default, skip_serializing_if = "is_message")]
+    pub(crate) kind: EntryKind,
+}
+
+fn is_message(kind: &EntryKind) -> bool {
+    *kind == EntryKind::Message
 }
 
 #[derive(Debug, Clone, Default)]
@@ -417,6 +427,8 @@ struct Entry {
     /// RFC 3339 time of the append.
     ts: String,
     message: Message,
+    sender: Option<Sender>,
+    kind: EntryKind,
 }
 
 impl From<LogEntry> for Entry {
@@ -430,6 +442,8 @@ impl From<LogEntry> for Entry {
                 tool_call_id: log_entry.tool_call_id,
                 is_error: log_entry.is_error,
             },
+            sender: log_entry.sender,
+            kind: log_entry.kind,
         }
     }
 }
@@ -470,14 +484,18 @@ pub(crate) struct EntrySnapshot {
     /// RFC 3339 timestamp from the original append.
     pub(crate) ts: String,
     pub(crate) message: Message,
+    pub(crate) sender: Option<Sender>,
+    pub(crate) kind: EntryKind,
 }
 
 impl EntrySnapshot {
-    fn at(idx: usize, ts: String, message: Message) -> Self {
+    fn at(idx: usize, entry: Entry) -> Self {
         Self {
             seq: (idx + 1) as u64,
-            ts,
-            message,
+            ts: entry.ts,
+            message: entry.message,
+            sender: entry.sender,
+            kind: entry.kind,
         }
     }
 }
@@ -510,7 +528,27 @@ impl ConversationLog {
         if message.role == "assistant" {
             return Err("append rejects role=\"assistant\"; use append_assistant".to_string());
         }
-        self.push(message, AssistantAttribution::default()).await
+        self.write(
+            message,
+            AssistantAttribution::default(),
+            None,
+            EntryKind::Message,
+        )
+        .await
+    }
+
+    pub(crate) async fn append_user(
+        &mut self,
+        message: Message,
+        sender: Sender,
+    ) -> Result<(), String> {
+        self.write(
+            message,
+            AssistantAttribution::default(),
+            Some(sender),
+            EntryKind::Message,
+        )
+        .await
     }
 
     /// Returns Err if the message has no content blocks and no tool calls —
@@ -532,7 +570,8 @@ impl ConversationLog {
                 "refusing to persist assistant message with no content and no tool_calls".into(),
             );
         }
-        self.push(message, attribution).await
+        self.write(message, attribution, None, EntryKind::Message)
+            .await
     }
 
     /// Give every tool call the model made that has no tool entry yet one
@@ -562,14 +601,18 @@ impl ConversationLog {
         Ok(())
     }
 
-    async fn push(
+    async fn write(
         &mut self,
         message: Message,
         attribution: AssistantAttribution,
+        sender: Option<Sender>,
+        kind: EntryKind,
     ) -> Result<(), String> {
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
+            sender,
+            kind,
         };
         let log_entry = Self::entry_to_log_entry(&entry, attribution);
         self.store.append_event(&log_entry).await?;
@@ -577,27 +620,42 @@ impl ConversationLog {
         Ok(())
     }
 
-    /// On a failed truncate the window is left as it was, so memory and disk
-    /// agree.
-    pub(crate) async fn clear(&mut self) -> Result<(), String> {
+    /// Cut the window to one clear entry from `sender`. On a failed truncate
+    /// the window is left as it was, so memory and disk agree.
+    pub(crate) async fn clear(&mut self, sender: Sender) -> Result<(), String> {
         self.store.clear().await?;
         self.entries.clear();
-        Ok(())
+        let message = Message {
+            role: "user".into(),
+            ..Default::default()
+        };
+        self.write(
+            message,
+            AssistantAttribution::default(),
+            Some(sender),
+            EntryKind::Clear,
+        )
+        .await
     }
 
-    /// Archive the window, then start the new one with `summary` alone. A
-    /// failed archive leaves the window as it was; a summary that cannot be
-    /// appended after a good archive leaves it empty.
-    pub(crate) async fn compact(&mut self, summary: &str) -> Result<(), String> {
+    /// Archive the window, then start the new one with one compact entry
+    /// from `sender` holding `summary`. A failed archive leaves the window as
+    /// it was; a summary that cannot be appended after a good archive leaves
+    /// it empty.
+    pub(crate) async fn compact(&mut self, summary: &str, sender: Sender) -> Result<(), String> {
         self.store.archive().await?;
         self.entries.clear();
-        self.append(Message {
+        let message = Message {
             role: "user".into(),
             content: text_content(&format!("{SUMMARY_PREFIX}{summary}")),
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        })
+            ..Default::default()
+        };
+        self.write(
+            message,
+            AssistantAttribution::default(),
+            Some(sender),
+            EntryKind::Compact,
+        )
         .await
     }
 
@@ -607,17 +665,21 @@ impl ConversationLog {
                 .into_iter()
                 .map(Entry::from)
                 .enumerate()
-                .map(|(idx, e)| EntrySnapshot::at(idx, e.ts, e.message))
+                .map(|(idx, e)| EntrySnapshot::at(idx, e))
                 .collect()
         }))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.iter().all(|e| e.kind == EntryKind::Clear)
     }
 
     pub(crate) fn history_for_provider(&self) -> Vec<Message> {
-        self.entries.iter().map(|e| e.message.clone()).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.kind != EntryKind::Clear)
+            .map(|e| e.message.clone())
+            .collect()
     }
 
     fn entry_to_log_entry(entry: &Entry, attribution: AssistantAttribution) -> LogEntry {
@@ -650,6 +712,8 @@ impl ConversationLog {
             model: attribution.model,
             system_prompt_sha256: attribution.system_prompt_sha256,
             warnings: attribution.warnings,
+            sender: entry.sender.clone(),
+            kind: entry.kind,
         }
     }
 
@@ -666,7 +730,7 @@ impl ConversationLog {
             .iter()
             .enumerate()
             .skip(skip)
-            .map(|(idx, e)| EntrySnapshot::at(idx, e.ts.clone(), e.message.clone()))
+            .map(|(idx, e)| EntrySnapshot::at(idx, e.clone()))
             .collect();
         ConversationSnapshot {
             entries,
@@ -684,22 +748,12 @@ pub(crate) struct ConversationSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_doubles::{record, throwaway_log};
+    use crate::test_doubles::{record, text_msg, throwaway_log, ArchiveStep, ArchiveStub, ALICE};
     use proto_common::{content_text, text_block};
     use tempfile::TempDir;
 
     fn store_at(root: &Path) -> Arc<LocalFsStore> {
         Arc::new(LocalFsStore::new(root.to_path_buf(), 10))
-    }
-
-    fn text_msg(role: &str, text: &str) -> Message {
-        Message {
-            role: role.into(),
-            content: text_content(text),
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        }
     }
 
     #[tokio::test]
@@ -1007,6 +1061,46 @@ mod tests {
         assert_eq!(rebuilt_ts, original_ts, "ts must survive rebuild");
     }
 
+    // A user entry keeps who sent it: a person, a sub-agent, the parent
+    // agent or sycophant, in the snapshot and after a rebuild. An assistant
+    // entry has no sender.
+    #[tokio::test]
+    async fn each_user_entry_keeps_its_sender_through_a_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        let store: Arc<dyn ConversationStore> = store_at(tmp.path());
+        let mut log = ConversationLog::new(store.clone());
+        let senders = [
+            Sender::person(ALICE),
+            Sender::sub_agent("sub/0a1b2c3d"),
+            Sender::parent_agent("one"),
+            Sender::sycophant(),
+        ];
+        for (n, sender) in senders.iter().enumerate() {
+            log.append_user(text_msg("user", &format!("msg-{n}")), sender.clone())
+                .await
+                .unwrap();
+        }
+        log.append_assistant(
+            text_msg("assistant", "noted"),
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
+
+        let want: Vec<Option<Sender>> = senders.iter().cloned().map(Some).chain([None]).collect();
+        let senders_of = |log: &ConversationLog| -> Vec<Option<Sender>> {
+            log.snapshot(None)
+                .entries
+                .into_iter()
+                .map(|e| e.sender)
+                .collect()
+        };
+        assert_eq!(senders_of(&log), want);
+        drop(log);
+        let rebuilt = ConversationLog::rebuild(store).await.unwrap();
+        assert_eq!(senders_of(&rebuilt), want, "the sender survives a rebuild");
+    }
+
     // A tool-role image is persisted with its bytes emptied and its caption
     // and tool_call_id kept.
     #[tokio::test]
@@ -1118,13 +1212,16 @@ mod tests {
         out
     }
 
-    // A clear empties conversation.log in place: the same file (same inode)
-    // is cut to 0 bytes, and no name at the root or in its folders is added
-    // or removed. The archives, the execution log and a subdirectory's
-    // conversation.log stay byte-equal. The next context, in memory and after
-    // a restart, holds only what came after the clear.
+    // A clear cuts conversation.log in place: the same file (same inode) is
+    // left holding one clear entry from the person who asked, with no
+    // content, and no name at the root or in its folders is added or
+    // removed. The archives, the execution log and a subdirectory's
+    // conversation.log stay byte-equal. The model never sees the clear
+    // entry: the next context, in memory and after a restart, holds only
+    // what came after the clear.
     #[tokio::test]
-    async fn clear_empties_conversation_log_in_place_and_leaves_archives_and_subdirectories() {
+    async fn clear_cuts_conversation_log_in_place_to_one_clear_entry_from_the_person_and_leaves_archives_and_subdirectories(
+    ) {
         use std::os::unix::fs::MetadataExt;
 
         let tmp = TempDir::new().unwrap();
@@ -1152,7 +1249,9 @@ mod tests {
             .ino();
         let names = tree_names(root);
 
-        log.clear().await.expect("clear empties the log");
+        log.clear(Sender::person(ALICE))
+            .await
+            .expect("clear cuts the log");
 
         let after = fs::metadata(&current).expect("conversation.log still exists");
         assert_eq!(
@@ -1160,7 +1259,27 @@ mod tests {
             inode,
             "clear keeps the same conversation.log file"
         );
-        assert_eq!(after.len(), 0, "clear empties conversation.log");
+        let entries = logged_entries(root);
+        assert_eq!(entries.len(), 1, "clear leaves one entry, got {entries:?}");
+        assert_eq!(
+            i32::from(entries[0].kind),
+            EntryKind::Clear as i32,
+            "the entry is of kind clear"
+        );
+        assert_eq!(
+            entries[0].sender,
+            Some(Sender::person(ALICE)),
+            "from the person"
+        );
+        assert_eq!(entries[0].role, "user");
+        assert!(
+            entries[0].content.is_empty(),
+            "the clear entry has no content"
+        );
+        assert!(
+            log.history_for_provider().is_empty(),
+            "the model does not see the clear entry"
+        );
         assert_eq!(
             tree_names(root),
             names,
@@ -1262,82 +1381,16 @@ mod tests {
         assert_eq!(texts, ["already here", "next"]);
     }
 
-    // What the test store's `archive` does in place of logrotate.
-    #[derive(Clone, Copy, Debug)]
-    enum ArchiveStep {
-        // conversation.log becomes conversation.log.1.gz; Ok.
-        RenameOk,
-        // Nothing on disk changes; Err.
-        ErrUntouched,
-    }
-
-    // A store on a real LocalFsStore that stands in for logrotate in
-    // `archive` and can refuse every append.
-    struct ArchiveStub {
-        inner: LocalFsStore,
-        step: ArchiveStep,
-        fail_append: bool,
-    }
-
-    impl ArchiveStub {
-        fn new(root: &Path, step: ArchiveStep) -> Self {
-            Self {
-                inner: LocalFsStore::new(root.to_path_buf(), 10),
-                step,
-                fail_append: false,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ConversationStore for ArchiveStub {
-        async fn append_event(&self, entry: &LogEntry) -> Result<(), String> {
-            if self.fail_append {
-                return Err("append refused by the test store".into());
-            }
-            self.inner.append_event(entry).await
-        }
-
-        async fn read_all(&self) -> Result<Vec<LogEntry>, String> {
-            self.inner.read_all().await
-        }
-
-        async fn clear(&self) -> Result<(), String> {
-            self.inner.clear().await
-        }
-
-        async fn archive(&self) -> Result<(), String> {
-            let rename = || {
-                fs::rename(
-                    self.inner.root.join("conversation.log"),
-                    self.inner.root.join("conversation.log.1.gz"),
-                )
-                .unwrap()
-            };
-            match self.step {
-                ArchiveStep::RenameOk => {
-                    rename();
-                    Ok(())
-                }
-                ArchiveStep::ErrUntouched => Err("archive failed".into()),
-            }
-        }
-
-        async fn read_archive(&self, n: u64) -> Result<Option<Vec<LogEntry>>, String> {
-            self.inner.read_archive(n).await
-        }
-    }
-
     fn texts_of(history: Vec<Message>) -> Vec<String> {
         history.iter().map(|m| content_text(&m.content)).collect()
     }
 
     // A compact archives the old window first, then starts the new one with
-    // the summary as its only entry: role user, one text block with the
-    // summary prefix, both on disk and in memory. The archive holds the old
-    // window.
+    // the summary as its only entry: role user, kind compact, from the
+    // person who asked, one text block with the summary prefix, both on disk
+    // and in memory. The archive holds the old window.
     #[tokio::test]
-    async fn compact_archives_then_starts_the_window_with_the_summary_alone() {
+    async fn compact_archives_then_starts_the_window_with_one_compact_entry_from_the_person() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         let mut log = ConversationLog::new(Arc::new(ArchiveStub::new(root, ArchiveStep::RenameOk)));
@@ -1352,7 +1405,7 @@ mod tests {
         .unwrap();
         let old_window = fs::read(root.join("conversation.log")).unwrap();
 
-        log.compact("the door is blue")
+        log.compact("the door is blue", Sender::person(ALICE))
             .await
             .expect("compact succeeds");
 
@@ -1371,6 +1424,12 @@ mod tests {
         );
         let entry: LogEntry = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(entry.role, "user");
+        assert_eq!(
+            i32::from(entry.kind),
+            EntryKind::Compact as i32,
+            "the entry is of kind compact"
+        );
+        assert_eq!(entry.sender, Some(Sender::person(ALICE)), "from the person");
         assert_eq!(entry.content.len(), 1, "one text block");
         assert_eq!(content_text(&entry.content), want);
 
@@ -1413,7 +1472,7 @@ mod tests {
             assert_eq!(texts_of(log.history_for_provider()), ["a", "b"]);
 
             let err = log
-                .compact("the summary")
+                .compact("the summary", Sender::person(ALICE))
                 .await
                 .expect_err("a failed compact returns its error");
             assert_eq!(

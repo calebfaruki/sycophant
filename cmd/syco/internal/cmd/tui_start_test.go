@@ -100,6 +100,26 @@ func TestTUIStartScreenDropsTheLogoWhenShortAndNeverWrapsItWhenNarrow(t *testing
 	}
 }
 
+func TestTUIStartScreenUsesTheWindowSizeSentBeforeTheOnlyAgentWasPicked(t *testing.T) {
+	newClientEnv(t)
+	cfgDir, p, token := testProfile(t)
+	p.Agent = ""
+	d := newTUIDriver(t, newTUIModel(cfgDir, p, token))
+	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	d.update(agentsMsg{agents: []string{testAgent}})
+	d.waitConnected()
+	v := d.view()
+	if v == "Connecting…" {
+		t.Fatalf("chat screen still shows %q after connecting; the size sent before the pick was lost", v)
+	}
+	if lines := strings.Split(v, "\n"); len(lines) != 24 {
+		t.Fatalf("view is %d lines, want the screen's 24:\n%s", len(lines), v)
+	}
+	if w := d.model.(*tuiModel).viewport.Width(); w != 80 {
+		t.Fatalf("transcript is %d wide, want the screen's 80", w)
+	}
+}
+
 func TestTUIDroppedStreamShowsDisconnectedUntilItReconnects(t *testing.T) {
 	f, d, stream := connectedTUI(t)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 24})

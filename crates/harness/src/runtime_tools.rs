@@ -6,7 +6,7 @@
 //! Instruction content is read directly from this agent's mounted instructions
 //! volume as an arbitrary read-only file tree; they never fabricate results.
 
-use proto_common::{content_text, text_block, CallToolResponse, ToolInfo};
+use proto_common::{content_text, text_block, CallToolResponse, EntryKind, Sender, ToolInfo};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -319,11 +319,12 @@ fn dispatch_read(
 
 /// `StartSubAgent(sub_agent, mandate)`: the new sub-agent's path, or the
 /// error that kept it from starting. The other sub-agent tools take a path,
-/// `<sub_agent>/<id>`.
+/// `<sub_agent>/<id>`. `MessageSubAgent` sends its message from `sender`.
 pub(crate) async fn dispatch_sub_agent_tool(
     name: &str,
     input_json: &str,
     hub: &std::sync::Arc<DispatchHub>,
+    sender: Sender,
 ) -> CallToolResponse {
     let done: Result<String, String> = async {
         match name {
@@ -338,7 +339,7 @@ pub(crate) async fn dispatch_sub_agent_tool(
             }
             MESSAGE_SUB_AGENT_TOOL_NAME => {
                 let a: MessageArgs = args(input_json)?;
-                hub.message(&a.path, &a.message)
+                hub.message(&a.path, sender, &a.message)
                     .await
                     .map(|()| "sent".into())
             }
@@ -416,6 +417,7 @@ fn entries_json(
 ) -> Result<String, String> {
     let entries: Vec<EntryJson> = page(entries, offset, limit)
         .into_iter()
+        .filter(|e| e.kind != EntryKind::Clear)
         .map(|e| EntryJson {
             seq: e.seq,
             ts: e.ts,
@@ -580,9 +582,9 @@ mod tests {
         );
     }
 
-    /// A store whose one archive, 1, holds five entries: a user turn, an
-    /// assistant reply, an assistant turn that only calls a tool, that tool's
-    /// error result and a last user turn.
+    /// A store whose one archive, 1, holds five entries: a clear entry with no
+    /// content, an assistant reply, an assistant turn that only calls a tool,
+    /// that tool's error result and a last user turn.
     struct OneArchive;
 
     #[async_trait::async_trait]
@@ -604,6 +606,9 @@ mod tests {
                 let entry = |role: &str, text: &str| -> LogEntry {
                     serde_json::from_str(&record(role, text)).unwrap()
                 };
+                let mut clear = entry("user", "");
+                clear.content.clear();
+                clear.kind = proto_common::EntryKind::Clear;
                 let mut call = entry("assistant", "");
                 call.content.clear();
                 call.tool_calls = vec![proto_common::ToolCall {
@@ -615,7 +620,7 @@ mod tests {
                 result.tool_call_id = Some("call-1".into());
                 result.is_error = Some(true);
                 vec![
-                    entry("user", "a"),
+                    clear,
                     entry("assistant", "b"),
                     call,
                     result,
@@ -645,6 +650,17 @@ mod tests {
                 },
                 {"seq": 4, "ts": "t", "role": "tool", "text": "[tool error]\nfile not found: a.md"}
             ])
+        );
+
+        let resp = dispatch_read_archive(r#"{"archive":1,"limit":2}"#, &log)
+            .await
+            .unwrap();
+        assert!(!resp.is_error, "{}", content_text(&resp.content));
+        let got: serde_json::Value = serde_json::from_str(&content_text(&resp.content)).unwrap();
+        assert_eq!(
+            got,
+            serde_json::json!([{"seq": 2, "ts": "t", "role": "assistant", "text": "b"}]),
+            "the model does not see a clear entry"
         );
     }
 }

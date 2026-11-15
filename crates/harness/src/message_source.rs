@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use proto_common::{ContentBlock, UserMessage};
+use proto_common::{ContentBlock, Sender, UserMessage};
 use tokio_stream::StreamExt;
 use tonic::Streaming;
 
@@ -17,8 +17,7 @@ pub(crate) trait MessageSource: Send {
 pub(crate) struct InboundMessage {
     pub content: Vec<ContentBlock>,
     pub reply_channel_stream: Option<String>,
-    /// The authenticated subject the relay stamped on the message.
-    pub sender: String,
+    pub sender: Sender,
     /// Relay-minted id echoed on this message's turn-state and stream frames.
     pub message_id: String,
 }
@@ -124,7 +123,7 @@ impl MessageSource for SubscribeMessageSource {
                     return Ok(InboundMessage {
                         content: msg.content,
                         reply_channel_stream: msg.reply_channel_stream,
-                        sender: msg.sender,
+                        sender: Sender::person(msg.sender),
                         message_id: msg.message_id,
                     });
                 }
@@ -203,7 +202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_message_source_happy_path_yields_message() {
+    async fn subscribe_message_source_happy_path_yields_message_from_the_person() {
         let driver = MockDriver::new(vec![Ok(())], vec![Ok(user_message("hi"))]);
         let flag = Arc::new(AtomicBool::new(false));
         let mut src =
@@ -211,6 +210,7 @@ mod tests {
         let msg = src.next_message().await.unwrap();
         assert_eq!(msg.content.len(), 1);
         assert_eq!(msg.message_id, "test-mid");
+        assert_eq!(msg.sender, Sender::person("u"));
         assert!(flag.load(Ordering::Relaxed));
     }
 

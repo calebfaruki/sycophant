@@ -15,8 +15,9 @@ use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
     CancelToolRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
     ClearContextRequest, ClientResponse, CompactContextRequest, GetConversationHistoryRequest,
-    GetTurnStateRequest, TakeBackMessageRequest, ToolComplete, ToolResultFrame, TurnState,
-    TurnStateEvent, UserMessage,
+    GetConversationHistoryResponse, GetTurnStateRequest, ListSubAgentsRequest,
+    ListSubAgentsResponse, MessageSubAgentRequest, ReadSubAgentLogRequest, StopSubAgentRequest,
+    TakeBackMessageRequest, ToolComplete, ToolResultFrame, TurnState, TurnStateEvent, UserMessage,
 };
 use relay_controller::gateway::GatewayService;
 use relay_controller::state::{ChannelStreamOpener, GatewayState};
@@ -573,46 +574,127 @@ async fn get_conversation_history_reaches_the_harness_unchanged_for_any_subject_
     assert_eq!(*seen_history.lock().unwrap(), Some(sent));
 }
 
+/// The relay stamps the sender itself on clear, compact and a message to a
+/// sub-agent: a sender the client writes is replaced by the caller's
+/// subject, and every other field reaches the harness unchanged.
 #[tokio::test]
-async fn clear_context_reaches_the_harness_unchanged() {
-    let seen_clear: Arc<Mutex<Option<ClearContextRequest>>> = Arc::default();
-    let (svc, _) = service_on(MockHarness {
-        seen_clear: seen_clear.clone(),
-        ..Default::default()
-    })
-    .await;
-    let sent = ClearContextRequest {
+async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender() {
+    let mock = MockHarness::default();
+    let (seen_clear, seen_compact, seen_message) = (
+        mock.seen_clear.clone(),
+        mock.seen_compact.clone(),
+        mock.seen_message_sub_agent.clone(),
+    );
+    let (svc, _) = service_on(mock).await;
+
+    let clear = ClearContextRequest {
         agent: "alpha".into(),
+        sender: BOB.into(),
     };
-    svc.clear_context(bearer(ALICE_TOKEN, sent.clone()))
+    svc.clear_context(bearer(ALICE_TOKEN, clear.clone()))
         .await
         .unwrap();
-    assert_eq!(*seen_clear.lock().unwrap(), Some(sent));
+    assert_eq!(
+        *seen_clear.lock().unwrap(),
+        Some(ClearContextRequest {
+            sender: ALICE.into(),
+            ..clear
+        })
+    );
+
+    let compact = CompactContextRequest {
+        agent: "alpha".into(),
+        sender: BOB.into(),
+    };
+    svc.compact_context(bearer(ALICE_TOKEN, compact.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        *seen_compact.lock().unwrap(),
+        Some(CompactContextRequest {
+            sender: ALICE.into(),
+            ..compact
+        })
+    );
+
+    let message = MessageSubAgentRequest {
+        agent: "alpha".into(),
+        path: "scout".into(),
+        text: "look again".into(),
+        sender: BOB.into(),
+    };
+    svc.message_sub_agent(bearer(ALICE_TOKEN, message.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        *seen_message.lock().unwrap(),
+        Some(MessageSubAgentRequest {
+            sender: ALICE.into(),
+            ..message
+        })
+    );
 }
 
 #[tokio::test]
-async fn compact_context_reaches_the_harness_unchanged() {
-    let seen_compact: Arc<Mutex<Option<CompactContextRequest>>> = Arc::default();
-    let (svc, _) = service_on(MockHarness {
-        seen_compact: seen_compact.clone(),
+async fn list_read_log_and_stop_sub_agent_reach_the_harness_unchanged_and_return_its_answer() {
+    let sub_agents = ListSubAgentsResponse {
+        paths: vec!["scout/0a1b2c3d".into()],
+    };
+    let sub_agent_log = GetConversationHistoryResponse {
+        entries: vec![],
+        total_seq: 7,
+        truncated: true,
+    };
+    let mock = MockHarness {
+        sub_agents: sub_agents.clone(),
+        sub_agent_log: sub_agent_log.clone(),
         ..Default::default()
-    })
-    .await;
-    let sent = CompactContextRequest {
+    };
+    let (seen_list, seen_log, seen_stop) = (
+        mock.seen_list_sub_agents.clone(),
+        mock.seen_read_sub_agent_log.clone(),
+        mock.seen_stop_sub_agent.clone(),
+    );
+    let (svc, _) = service_on(mock).await;
+
+    let list = ListSubAgentsRequest {
         agent: "alpha".into(),
     };
-    svc.compact_context(bearer(ALICE_TOKEN, sent.clone()))
+    let resp = svc
+        .list_sub_agents(bearer(ALICE_TOKEN, list.clone()))
         .await
         .unwrap();
-    assert_eq!(*seen_compact.lock().unwrap(), Some(sent));
+    assert_eq!(resp.into_inner(), sub_agents);
+    assert_eq!(*seen_list.lock().unwrap(), Some(list));
+
+    let read = ReadSubAgentLogRequest {
+        agent: "alpha".into(),
+        path: "scout/0a1b2c3d".into(),
+    };
+    let resp = svc
+        .read_sub_agent_log(bearer(ALICE_TOKEN, read.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.into_inner(), sub_agent_log);
+    assert_eq!(*seen_log.lock().unwrap(), Some(read));
+
+    let stop = StopSubAgentRequest {
+        agent: "alpha".into(),
+        path: "scout/0a1b2c3d".into(),
+    };
+    svc.stop_sub_agent(bearer(ALICE_TOKEN, stop.clone()))
+        .await
+        .unwrap();
+    assert_eq!(*seen_stop.lock().unwrap(), Some(stop));
 }
 
 // --- Tool forwarding ----------------------------------------------------------
 
-/// The relay is a pipe for tool dispatch: the request reaches the harness
-/// field-for-field and the harness's call_id comes back unaltered.
+/// On a tool call the relay replaces the sender with the caller's subject,
+/// every other field reaches the harness unchanged, and the harness's
+/// call_id comes back unaltered.
 #[tokio::test]
-async fn dispatch_tool_forwards_request_unmodified_and_returns_harness_call_id() {
+async fn dispatch_tool_stamps_the_callers_sender_and_returns_harness_call_id() {
     let seen_dispatch: Arc<Mutex<Option<CallToolRequest>>> = Arc::default();
     let (svc, _) = service_on(MockHarness {
         seen_dispatch: seen_dispatch.clone(),
@@ -623,13 +705,20 @@ async fn dispatch_tool_forwards_request_unmodified_and_returns_harness_call_id()
         name: "Bash".into(),
         input_json: r#"{"cmd":"ls"}"#.into(),
         agent: "alpha".into(),
+        sender: BOB.into(),
     };
     let resp = svc
         .dispatch_tool(bearer(ALICE_TOKEN, sent.clone()))
         .await
         .unwrap();
     assert_eq!(resp.into_inner().call_id, MOCK_CALL_ID);
-    assert_eq!(*seen_dispatch.lock().unwrap(), Some(sent));
+    assert_eq!(
+        *seen_dispatch.lock().unwrap(),
+        Some(CallToolRequest {
+            sender: ALICE.into(),
+            ..sent
+        })
+    );
 }
 
 /// Result frames are relayed 1:1, in order, with no filtering, truncation,

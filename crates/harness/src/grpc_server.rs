@@ -7,9 +7,11 @@ use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
     CancelTurnRequest, CancelTurnResponse, ClearContextRequest, ClearContextResponse,
     CompactContextRequest, CompactContextResponse, DispatchToolResponse,
-    GetConversationHistoryRequest, GetConversationHistoryResponse, HistoryEntry, Message,
-    TakeBackMessageRequest, TakeBackMessageResponse, ToolInfo, ToolListUpdate, ToolResultFrame,
-    WatchToolsRequest,
+    GetConversationHistoryRequest, GetConversationHistoryResponse, HistoryEntry,
+    ListSubAgentsRequest, ListSubAgentsResponse, Message, MessageSubAgentRequest,
+    MessageSubAgentResponse, ReadSubAgentLogRequest, Sender, StopSubAgentRequest,
+    StopSubAgentResponse, TakeBackMessageRequest, TakeBackMessageResponse, ToolInfo,
+    ToolListUpdate, ToolResultFrame, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,8 +20,9 @@ use toolset_proto::TurnRequest;
 
 use crate::agent_state::AgentState;
 use crate::clients::InferenceRpc;
-use crate::conversation::tool_turn_as_text;
-use crate::tool_router::ToolRouter;
+use crate::conversation::{tool_turn_as_text, EntrySnapshot};
+use crate::dispatch_hub::DispatchHub;
+use crate::tool_router::{RelaySeam, ToolRouter};
 use crate::turn::{consume_turn_stream, EmitState, NullSink, TurnAbort};
 
 /// The fixed harness instruction that closes the one no-tools inference
@@ -35,6 +38,8 @@ pub(crate) type InferenceFactory = Arc<dyn Fn() -> Box<dyn InferenceRpc> + Send 
 pub(crate) struct HarnessService {
     router: Arc<ToolRouter>,
     agent_state: Arc<AgentState>,
+    /// The agent's relay, for the clear and compact entries.
+    relay: RelaySeam,
     /// The agent's model, for the compaction call.
     inference: InferenceFactory,
     /// How long the compaction call's stream may go without an event.
@@ -45,12 +50,14 @@ impl HarnessService {
     pub(crate) fn new(
         router: Arc<ToolRouter>,
         agent_state: Arc<AgentState>,
+        relay: RelaySeam,
         inference: InferenceFactory,
         idle_gap: std::time::Duration,
     ) -> Self {
         Self {
             router,
             agent_state,
+            relay,
             inference,
             idle_gap,
         }
@@ -105,6 +112,38 @@ impl HarnessService {
         }
         Ok(summary)
     }
+
+    /// Send the log's last entry, a clear or compact entry, through the
+    /// message hook.
+    async fn send_last_entry(&self) {
+        let last = self.agent_state.log().read().await.snapshot(Some(1));
+        let Some(entry) = last.entries.into_iter().next() else {
+            return;
+        };
+        let sent = (self.relay)()
+            .deliver_reply(entry.kind, entry.message.content)
+            .await;
+        if let Err(e) = sent {
+            tracing::warn!(error = %e, "entry not sent");
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn hub(&self) -> Result<&Arc<DispatchHub>, Status> {
+        self.router
+            .sub_agents()
+            .ok_or_else(|| Status::failed_precondition("this agent has no sub-agents"))
+    }
+}
+
+fn history_entry(e: EntrySnapshot) -> HistoryEntry {
+    HistoryEntry {
+        seq: e.seq,
+        ts: e.ts,
+        message: Some(e.message),
+        sender: e.sender,
+        kind: e.kind.into(),
+    }
 }
 
 #[tonic::async_trait]
@@ -144,7 +183,7 @@ impl HarnessControl for HarnessService {
         let req = request.into_inner();
         let call_id = self
             .router
-            .dispatch_client_tool(&req.name, &req.input_json)
+            .dispatch_client_tool(&req.name, &req.input_json, &req.sender)
             .await
             .map_err(|e| Status::internal(format!("dispatch_tool: {e}")))?;
         Ok(Response::new(DispatchToolResponse { call_id }))
@@ -202,41 +241,41 @@ impl HarnessControl for HarnessService {
 
     async fn clear_context(
         &self,
-        _request: Request<ClearContextRequest>,
+        request: Request<ClearContextRequest>,
     ) -> Result<Response<ClearContextResponse>, Status> {
+        let sender = Sender::person(request.into_inner().sender);
         let _slot = self.agent_state.acquire_turn_slot().await;
         self.agent_state
             .log()
             .write()
             .await
-            .clear()
+            .clear(sender)
             .await
             .map_err(|e| Status::internal(format!("clear conversation: {e}")))?;
+        self.send_last_entry().await;
         Ok(Response::new(ClearContextResponse {}))
     }
 
     async fn compact_context(
         &self,
-        _request: Request<CompactContextRequest>,
+        request: Request<CompactContextRequest>,
     ) -> Result<Response<CompactContextResponse>, Status> {
+        let sender = Sender::person(request.into_inner().sender);
         let _slot = self.agent_state.acquire_turn_slot().await;
         let log = self.agent_state.log();
-        let window = {
-            let log = log.read().await;
-            if log.is_empty() {
-                // Compacting an empty window is a no-op, like clearing one.
-                return Ok(Response::new(CompactContextResponse {}));
-            }
-            log.history_for_provider()
-        };
+        let window = log.read().await.history_for_provider();
+        if window.is_empty() {
+            return Err(Status::failed_precondition("nothing to compact"));
+        }
         // The summary is written before the rotation, so a failed model call
         // leaves the window as it was.
         let summary = self.summarize(window).await?;
         log.write()
             .await
-            .compact(&summary)
+            .compact(&summary, sender)
             .await
             .map_err(|e| Status::internal(format!("compact conversation: {e}")))?;
+        self.send_last_entry().await;
         Ok(Response::new(CompactContextResponse {}))
     }
 
@@ -248,20 +287,64 @@ impl HarnessControl for HarnessService {
         let limit = req.limit.map(|n| n as usize);
         let snap = self.agent_state.log().read().await.snapshot(limit);
         let truncated = (snap.entries.len() as u64) < snap.total_seq;
-        let entries = snap
-            .entries
-            .into_iter()
-            .map(|e| HistoryEntry {
-                seq: e.seq,
-                ts: e.ts,
-                message: Some(e.message),
-            })
-            .collect();
         Ok(Response::new(GetConversationHistoryResponse {
-            entries,
+            entries: snap.entries.into_iter().map(history_entry).collect(),
             total_seq: snap.total_seq,
             truncated,
         }))
+    }
+
+    async fn list_sub_agents(
+        &self,
+        _request: Request<ListSubAgentsRequest>,
+    ) -> Result<Response<ListSubAgentsResponse>, Status> {
+        let paths = self
+            .hub()?
+            .list()
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(ListSubAgentsResponse { paths }))
+    }
+
+    async fn read_sub_agent_log(
+        &self,
+        request: Request<ReadSubAgentLogRequest>,
+    ) -> Result<Response<GetConversationHistoryResponse>, Status> {
+        let path = request.into_inner().path;
+        let entries = self
+            .hub()?
+            .read_log(&path)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(GetConversationHistoryResponse {
+            total_seq: entries.len() as u64,
+            entries: entries.into_iter().map(history_entry).collect(),
+            truncated: false,
+        }))
+    }
+
+    async fn message_sub_agent(
+        &self,
+        request: Request<MessageSubAgentRequest>,
+    ) -> Result<Response<MessageSubAgentResponse>, Status> {
+        let req = request.into_inner();
+        self.hub()?
+            .message(&req.path, Sender::person(req.sender), &req.text)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(MessageSubAgentResponse {}))
+    }
+
+    async fn stop_sub_agent(
+        &self,
+        request: Request<StopSubAgentRequest>,
+    ) -> Result<Response<StopSubAgentResponse>, Status> {
+        let path = request.into_inner().path;
+        self.hub()?
+            .stop(&path)
+            .await
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(StopSubAgentResponse {}))
     }
 }
 
@@ -580,6 +663,7 @@ mod dispatch_await_cancel_tests {
         let svc = HarnessService::new(
             router,
             agent_state,
+            crate::tool_router::relay_seam(crate::test_doubles::ScriptedRelay::default()),
             Arc::new(|| {
                 Box::new(crate::test_doubles::ScriptedTurns::new(vec![])) as Box<dyn InferenceRpc>
             }),
@@ -638,16 +722,25 @@ mod dispatch_await_cancel_tests {
 #[cfg(test)]
 mod context_tests {
     use super::*;
-    use crate::test_doubles::{complete_turn, record, ScriptedTurns, TEST_AG};
-    use proto_common::content_text;
+    use crate::test_doubles::{
+        complete_turn, record, ArchiveStep, ArchiveStub, ScriptedRelay, ScriptedTurns, ALICE, BOB,
+        TEST_AG,
+    };
+    use proto_common::{content_text, EntryKind};
     use std::fs;
 
     /// A service over a tempdir whose `conversation.log` holds `log`, answering
-    /// model calls from `model`.
+    /// model calls from `model`, and the relay it sends entries to.
     async fn service_with(
         log: &str,
         model: ScriptedTurns,
-    ) -> (HarnessService, tempfile::TempDir, Arc<AgentState>) {
+    ) -> (
+        HarnessService,
+        tempfile::TempDir,
+        Arc<AgentState>,
+        ScriptedRelay,
+    ) {
+        let relay = ScriptedRelay::default();
         let root = tempfile::TempDir::new().unwrap();
         fs::write(root.path().join("conversation.log"), log).unwrap();
         let agent_state = Arc::new(
@@ -658,16 +751,31 @@ mod context_tests {
         let svc = HarnessService::new(
             crate::test_doubles::test_router(agent_state.clone()),
             agent_state.clone(),
+            crate::tool_router::relay_seam(relay.clone()),
             Arc::new(move || Box::new(model.clone()) as Box<dyn InferenceRpc>),
             std::time::Duration::from_secs(45),
         );
-        (svc, root, agent_state)
+        (svc, root, agent_state, relay)
+    }
+
+    async fn history(svc: &HarnessService) -> Vec<(EntryKind, Option<Sender>, String)> {
+        svc.get_conversation_history(Request::new(GetConversationHistoryRequest::default()))
+            .await
+            .expect("history returns Ok")
+            .into_inner()
+            .entries
+            .into_iter()
+            .map(|e| {
+                let text = content_text(&e.message.clone().unwrap_or_default().content);
+                (e.kind(), e.sender, text)
+            })
+            .collect()
     }
 
     #[tokio::test]
     async fn history_limit_clips_to_the_tail_and_only_then_reports_truncated() {
         let current: String = (0..3).map(|n| record("user", &format!("m{n}"))).collect();
-        let (svc, _root, _) = service_with(&current, ScriptedTurns::new(vec![])).await;
+        let (svc, _root, _, _) = service_with(&current, ScriptedTurns::new(vec![])).await;
         for (limit, want_truncated, want_seqs) in
             [(Some(2), true, vec![2, 3]), (None, false, vec![1, 2, 3])]
         {
@@ -693,13 +801,14 @@ mod context_tests {
 
     // A clear or compact sent while a turn holds the turn slot waits for the
     // turn to end: no error, no summary call and no change to the log until
-    // then, and the clear runs once the turn ends.
+    // then, and once the turn ends the clear leaves one clear entry from the
+    // person who asked.
     #[tokio::test]
     async fn clear_and_compact_wait_for_a_running_turn_to_end() {
         let current = record("user", "mid-turn window");
         let model = ScriptedTurns::new(vec![]);
         let recorder = model.clone();
-        let (svc, root, agent_state) = service_with(&current, model).await;
+        let (svc, root, agent_state, _) = service_with(&current, model).await;
 
         let log_path = root.path().join("conversation.log");
         let still_waiting = std::time::Duration::from_millis(200);
@@ -707,6 +816,7 @@ mod context_tests {
 
         let compact = svc.compact_context(Request::new(CompactContextRequest {
             agent: TEST_AG.into(),
+            sender: ALICE.into(),
         }));
         assert!(
             tokio::time::timeout(still_waiting, compact).await.is_err(),
@@ -716,6 +826,7 @@ mod context_tests {
 
         let clear = svc.clear_context(Request::new(ClearContextRequest {
             agent: TEST_AG.into(),
+            sender: ALICE.into(),
         }));
         tokio::pin!(clear);
         assert!(
@@ -734,9 +845,90 @@ mod context_tests {
         drop(turn);
         clear.await.expect("clear runs once the turn ends");
         assert_eq!(
-            fs::read_to_string(&log_path).unwrap(),
-            "",
-            "the clear emptied the log after the turn"
+            history(&svc).await,
+            [(EntryKind::Clear, Some(Sender::person(ALICE)), String::new())],
+            "after the turn the log holds one clear entry from the person, with no content"
+        );
+    }
+
+    // A compact and then a clear each leave one entry of their kind in the
+    // history read after it, from the person who asked, and each sends that
+    // entry through the message hook.
+    #[tokio::test]
+    async fn clear_and_compact_each_leave_and_send_one_entry_of_their_kind_from_the_person_who_asked(
+    ) {
+        let model = ScriptedTurns::new(vec![complete_turn(
+            proto_common::StopReason::EndTurn,
+            "the door is blue",
+            &[],
+        )]);
+        let (svc, root, agent_state, relay) =
+            service_with(&record("user", "remember the blue door"), model).await;
+        *agent_state.log().write().await = crate::conversation::ConversationLog::rebuild(Arc::new(
+            ArchiveStub::new(root.path(), ArchiveStep::RenameOk),
+        ))
+        .await
+        .unwrap();
+
+        svc.compact_context(Request::new(CompactContextRequest {
+            agent: TEST_AG.into(),
+            sender: ALICE.into(),
+        }))
+        .await
+        .expect("the compact succeeds");
+        let compacted = history(&svc).await;
+        let summary = compacted
+            .first()
+            .map(|(_, _, text)| text.clone())
+            .unwrap_or_default();
+        assert!(
+            summary.contains("the door is blue"),
+            "the compact entry holds the summary, got {compacted:?}"
+        );
+        assert_eq!(
+            compacted,
+            [(
+                EntryKind::Compact,
+                Some(Sender::person(ALICE)),
+                summary.clone()
+            )],
+            "the compact leaves one compact entry from the person who asked"
+        );
+
+        svc.clear_context(Request::new(ClearContextRequest {
+            agent: TEST_AG.into(),
+            sender: BOB.into(),
+        }))
+        .await
+        .expect("the clear succeeds");
+        let cleared = [(EntryKind::Clear, Some(Sender::person(BOB)), String::new())];
+        assert_eq!(
+            history(&svc).await,
+            cleared,
+            "the clear leaves one clear entry from the person who asked"
+        );
+
+        let refused = svc
+            .compact_context(Request::new(CompactContextRequest {
+                agent: TEST_AG.into(),
+                sender: ALICE.into(),
+            }))
+            .await
+            .expect_err("a compact after the clear is refused");
+        assert_eq!(refused.message(), "nothing to compact");
+        assert_eq!(
+            history(&svc).await,
+            cleared,
+            "a compact after the clear leaves the one clear entry"
+        );
+
+        assert_eq!(
+            relay.entries(),
+            [
+                (EntryKind::Compact, summary),
+                (EntryKind::Clear, String::new()),
+            ],
+            "each entry goes through the message hook once, as written"
         );
     }
 
@@ -759,7 +951,7 @@ mod context_tests {
             &[],
         )]);
         let recorder = model.clone();
-        let (svc, _root, agent_state) = service_with(&current, model).await;
+        let (svc, _root, agent_state, _) = service_with(&current, model).await;
         let window = agent_state.log().read().await.history_for_provider();
 
         let summary = svc
@@ -814,13 +1006,199 @@ mod context_tests {
             "the door is",
             &[],
         )]);
-        let (svc, _root, agent_state) =
+        let (svc, _root, agent_state, _) =
             service_with(&record("user", "remember the blue door"), model).await;
         let window = agent_state.log().read().await.history_for_provider();
 
         assert!(
             svc.summarize(window).await.is_err(),
             "a summary cut off at the length limit is refused"
+        );
+    }
+}
+
+// The four sub-agent commands a person sends, served through the hub.
+#[cfg(test)]
+mod sub_agent_tests {
+    use super::*;
+    use proto_common::content_text;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::conversation::{AssistantAttribution, ConversationLog, LocalFsStore};
+    use crate::dispatch_hub::test_support::*;
+    use crate::dispatch_link::ParentLink;
+    use crate::queue::Inbox;
+    use crate::test_doubles::{test_instructions, text_msg, ScriptedRelay, ALICE, TEST_AG};
+
+    const PATH: &str = "sub/0a1b2c3d";
+    const OTHER: &str = "sub/12345678";
+
+    /// A hub of one fake sub-agent attached at `PATH`, with `listed` ready,
+    /// and the service and router over the hub's own agent state.
+    async fn one_sub_agent(
+        listed: Vec<String>,
+    ) -> (TestHub, HarnessService, Arc<ToolRouter>, ParentLink, Inbox) {
+        let inbox = Inbox::default();
+        let link = sub_agent_link_with(inbox.clone());
+        let uris = endpoints(vec![(PATH, serve(link.clone()))], silent_endpoint());
+        let h = test_hub(uris, ScriptedRelay::default(), listed);
+        h.hub.attach(PATH.into());
+        attached(&h, PATH).await;
+        let router = Arc::new(
+            ToolRouter::new(
+                test_instructions(),
+                TEST_AG.to_string(),
+                None,
+                h.agent_state.clone(),
+            )
+            .with_sub_agents(h.hub.clone()),
+        );
+        let svc = HarnessService::new(
+            router.clone(),
+            h.agent_state.clone(),
+            crate::tool_router::relay_seam(ScriptedRelay::default()),
+            Arc::new(|| {
+                Box::new(crate::test_doubles::ScriptedTurns::new(vec![])) as Box<dyn InferenceRpc>
+            }),
+            Duration::from_secs(45),
+        );
+        (h, svc, router, link, inbox)
+    }
+
+    #[tokio::test]
+    async fn list_sub_agents_returns_the_agents_ready_paths() {
+        let listed = vec![PATH.to_string(), OTHER.to_string()];
+        let (_h, svc, _, _, _) = one_sub_agent(listed.clone()).await;
+        let resp = svc
+            .list_sub_agents(Request::new(ListSubAgentsRequest {
+                agent: TEST_AG.into(),
+            }))
+            .await
+            .expect("list returns Ok")
+            .into_inner();
+        assert_eq!(resp.paths, listed);
+    }
+
+    #[tokio::test]
+    async fn read_sub_agent_log_returns_each_entry_with_its_sender() {
+        let (h, svc, _, _, _) = one_sub_agent(vec![]).await;
+        let folder = h.root.join(PATH);
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut log = ConversationLog::new(Arc::new(LocalFsStore::new(folder, 0)));
+        log.append_user(text_msg("user", "the mandate"), Sender::parent_agent(AGENT))
+            .await
+            .unwrap();
+        log.append_user(text_msg("user", "also tulip"), Sender::person(ALICE))
+            .await
+            .unwrap();
+        log.append_assistant(
+            text_msg("assistant", "the answer"),
+            AssistantAttribution::default(),
+        )
+        .await
+        .unwrap();
+
+        let resp = svc
+            .read_sub_agent_log(Request::new(ReadSubAgentLogRequest {
+                agent: TEST_AG.into(),
+                path: PATH.into(),
+            }))
+            .await
+            .expect("read log returns Ok")
+            .into_inner();
+        let got: Vec<(String, String, Option<Sender>)> = resp
+            .entries
+            .into_iter()
+            .map(|e| {
+                let m = e.message.unwrap_or_default();
+                (m.role, content_text(&m.content), e.sender)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "user".into(),
+                    "the mandate".into(),
+                    Some(Sender::parent_agent(AGENT))
+                ),
+                (
+                    "user".into(),
+                    "also tulip".into(),
+                    Some(Sender::person(ALICE))
+                ),
+                ("assistant".into(), "the answer".into(), None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_sub_agent_lands_in_the_sub_agent_from_the_person() {
+        let (_h, svc, _, _, inbox) = one_sub_agent(vec![]).await;
+        svc.message_sub_agent(Request::new(MessageSubAgentRequest {
+            agent: TEST_AG.into(),
+            path: PATH.into(),
+            text: "also tulip".into(),
+            sender: ALICE.into(),
+        }))
+        .await
+        .expect("message returns Ok");
+        assert_eq!(
+            landed_from(&inbox).await,
+            [(Sender::person(ALICE), "also tulip".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_sub_agent_stops_the_sub_agent() {
+        let (_h, svc, _, link, _) = one_sub_agent(vec![]).await;
+        svc.stop_sub_agent(Request::new(StopSubAgentRequest {
+            agent: TEST_AG.into(),
+            path: PATH.into(),
+        }))
+        .await
+        .expect("stop returns Ok");
+        tokio::time::timeout(Duration::from_secs(5), link.stopped())
+            .await
+            .expect("the sub-agent stops");
+    }
+
+    #[tokio::test]
+    async fn a_persons_message_sub_agent_call_lands_from_the_person_and_the_agents_from_the_parent_agent(
+    ) {
+        let (_h, svc, router, _, inbox) = one_sub_agent(vec![]).await;
+        let input = |text: &str| serde_json::json!({ "path": PATH, "message": text }).to_string();
+
+        svc.dispatch_tool(Request::new(CallToolRequest {
+            name: "MessageSubAgent".into(),
+            input_json: input("from alice"),
+            sender: ALICE.into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("dispatch returns Ok");
+        assert_eq!(
+            landed_from(&inbox).await,
+            [(Sender::person(ALICE), "from alice".to_string())],
+            "the person's call lands from the person"
+        );
+
+        let resp = router
+            .call_tool(
+                "MessageSubAgent",
+                &input("from the agent"),
+                false,
+                "tc",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a tool result");
+        assert!(!resp.is_error, "the agent's call reaches the hub");
+        assert_eq!(
+            landed_from(&inbox).await,
+            [(Sender::parent_agent(AGENT), "from the agent".to_string())],
+            "the agent's call lands from the parent agent"
         );
     }
 }

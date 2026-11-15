@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use proto_common::{text_block, CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
+use proto_common::{
+    text_block, CallToolResponse, Sender, ToolDefinition, ToolInfo, ToolResultFrame,
+};
 use shared::toolset::{validate_call_input, ArgDecl, ToolsetConfig, ToolsetEntry, ToolsetSecret};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -299,6 +301,10 @@ impl ToolRouter {
         self
     }
 
+    pub(crate) fn sub_agents(&self) -> Option<&Arc<DispatchHub>> {
+        self.hub.as_ref()
+    }
+
     fn execution_log(&self) -> Arc<dyn ExecutionLogWriter> {
         self.agent_state.execution_log()
     }
@@ -451,7 +457,8 @@ impl ToolRouter {
             }
             Source::Runtime => match &self.hub {
                 Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name) => {
-                    Ok(runtime_tools::dispatch_sub_agent_tool(name, input_json, hub).await)
+                    let sender = hub.agent_sender();
+                    Ok(runtime_tools::dispatch_sub_agent_tool(name, input_json, hub, sender).await)
                 }
                 _ => runtime_tools::dispatch(
                     name,
@@ -572,17 +579,22 @@ impl ToolRouter {
     /// frames on `await_client_tool`.
     ///
     /// An unknown name is answered here, before anything is spawned.
+    /// `sender` is the subject of the person who made the call.
     pub(crate) async fn dispatch_client_tool(
         &self,
         name: &str,
         input_json: &str,
+        sender: &str,
     ) -> Result<String, String> {
         match self
             .source_of(name)
             .ok_or_else(|| format!("unknown tool: {name}"))?
         {
             Source::Toolset => self.dispatch_client_toolset_tool(name, input_json).await,
-            Source::Runtime => self.dispatch_client_runtime_tool(name, input_json).await,
+            Source::Runtime => {
+                self.dispatch_client_runtime_tool(name, input_json, Sender::person(sender))
+                    .await
+            }
             // A channel-stream tool executes on the user's own device via a
             // `ServerRequest`. Dispatching one FROM that device would be a
             // request looping back at its own sender, so it is refused by name.
@@ -652,6 +664,7 @@ impl ToolRouter {
         &self,
         name: &str,
         input_json: &str,
+        sender: Sender,
     ) -> Result<String, String> {
         let call_id = format!("rt-{}", uuid::Uuid::new_v4());
 
@@ -669,9 +682,9 @@ impl ToolRouter {
 
         tokio::spawn(async move {
             let dispatched = match hub {
-                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name.as_str()) => {
-                    Ok(runtime_tools::dispatch_sub_agent_tool(&name, &input_json, &hub).await)
-                }
+                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name.as_str()) => Ok(
+                    runtime_tools::dispatch_sub_agent_tool(&name, &input_json, &hub, sender).await,
+                ),
                 _ => {
                     runtime_tools::dispatch(&name, &input_json, &instructions, &agent, &agent_state)
                         .await
@@ -1223,7 +1236,7 @@ mod tests {
 
             let capture = spawn_pod(&dispatch, tool, job_id, vec![done_terminal()]);
             router
-                .dispatch_client_tool(tool, "{}")
+                .dispatch_client_tool(tool, "{}", "")
                 .await
                 .unwrap_or_else(|e| panic!("client-direct call to {tool} completes: {e:?}"));
             claimed(&capture).await;
@@ -1471,7 +1484,7 @@ mod tests {
         );
 
         let call_id = router
-            .dispatch_client_tool("Bash", "{}")
+            .dispatch_client_tool("Bash", "{}", "")
             .await
             .expect("dispatch mints the call and spawns its stream consumer");
         let mut stream = router
@@ -1523,7 +1536,7 @@ mod tests {
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
 
         let call_id = router
-            .dispatch_client_tool("Bash", "{}")
+            .dispatch_client_tool("Bash", "{}", "")
             .await
             .expect("dispatch mints the call");
         let mut stream = router
@@ -1768,7 +1781,7 @@ mod tests {
         let router = classify_router();
 
         let call_id = router
-            .dispatch_client_tool("ListInstructions", "{}")
+            .dispatch_client_tool("ListInstructions", "{}", "")
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1790,7 +1803,7 @@ mod tests {
         let router = empty_router();
 
         let call_id = router
-            .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#)
+            .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#, "")
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1847,7 +1860,7 @@ mod tests {
         let router = classify_router();
 
         let call_id = router
-            .dispatch_client_tool("ListInstructions", "{}")
+            .dispatch_client_tool("ListInstructions", "{}", "")
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1867,7 +1880,7 @@ mod tests {
         let router: ToolRouter = empty_router().with_dispatch(dispatch.clone());
 
         let err = router
-            .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#)
+            .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "")
             .await
             .expect_err("a ChannelStream-source tool is not client-dispatchable");
         assert!(
@@ -2290,7 +2303,7 @@ mod tests {
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
         router
-            .dispatch_client_tool("Bash", "{}")
+            .dispatch_client_tool("Bash", "{}", "")
             .await
             .expect("the client's toolset call is dispatched");
         claimed(&capture).await;
@@ -2528,16 +2541,17 @@ mod tests {
 
         let mut reply = link.clone();
         reply
-            .deliver_reply(proto_common::text_content("the answer"))
+            .deliver_reply(
+                proto_common::EntryKind::Message,
+                proto_common::text_content("the answer"),
+            )
             .await
             .unwrap();
         let queued = next_queued(&h.agent_state).await;
-        let path = h
-            .jobs
-            .lock()
-            .unwrap()
-            .first()
-            .and_then(|j| container_env(j, "DISPATCH_PATH").map(str::to_string));
+        let path =
+            h.jobs.lock().unwrap().first().and_then(|j| {
+                container_env(j, "DISPATCH_PATH").map(proto_common::Sender::sub_agent)
+            });
         assert_eq!(
             (Some(queued.sender), queued.text),
             (path, "the answer".to_string()),
@@ -2551,7 +2565,7 @@ mod tests {
     /// A person's call of `name`: its assembled result.
     async fn client_call(router: &ToolRouter, name: &str, input: &str) -> CallToolResponse {
         let call_id = router
-            .dispatch_client_tool(name, input)
+            .dispatch_client_tool(name, input, "")
             .await
             .unwrap_or_else(|e| panic!("a person can call {name}, got {e}"));
         drain_client_call(router, &call_id).await.0

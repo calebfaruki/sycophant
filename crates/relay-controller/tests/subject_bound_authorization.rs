@@ -15,7 +15,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::future::LocalBoxFuture;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tonic::Request;
 
@@ -23,6 +24,7 @@ use proto_common::{
     tool_result_frame, AwaitToolResultRequest, CallToolRequest, CancelTurnRequest,
     ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ClearContextRequest,
     CompactContextRequest, ContentBlock, GetTurnStateRequest, ListAgentsRequest,
+    ListSubAgentsRequest, MessageSubAgentRequest, ReadSubAgentLogRequest, StopSubAgentRequest,
     TakeBackMessageRequest, ToolListUpdate, ToolResultFrame, TurnState, TurnStateEvent,
     UserMessage, WatchToolsRequest,
 };
@@ -62,6 +64,7 @@ fn call_tool(agent: &str) -> CallToolRequest {
         name: "Bash".into(),
         input_json: "{}".into(),
         agent: agent.into(),
+        sender: String::new(),
     }
 }
 
@@ -120,114 +123,118 @@ async fn a_person_request_is_authorized_by_a_subject_review_for_the_caller() {
     );
 }
 
-/// The review answers not-allowed and the relay denies the request
-/// before any harness dial.
-#[tokio::test]
-async fn a_person_request_the_review_denies_is_refused_without_a_harness_dial() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
-    let svc = service(&k8s).await;
-
-    let err = tokio::time::timeout(
-        Duration::from_secs(1),
-        svc.dispatch_tool(bearer(ALICE_TOKEN, call_tool("gamma"))),
-    )
-    .await
-    .expect("a denied review must be refused before the harness is dialed")
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    assert!(
-        err.message()
-            .contains("caller cannot reach the named agent"),
-        "{err:?}"
-    );
+#[allow(clippy::result_large_err)]
+fn erased<'a, T: 'a>(
+    call: impl std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>> + 'a,
+) -> LocalBoxFuture<'a, Result<(), tonic::Status>> {
+    call.map(|r| r.map(drop)).boxed_local()
 }
 
-/// The cancel, queue and context RPCs are person RPCs: a subject the review
-/// denies is refused on each before any harness dial.
+/// The tool call, cancel, queue, context and sub-agent commands are person RPCs, and a
+/// sub-agent has no reach of its own: each from a subject the review denies
+/// on the parent agent is refused before any harness dial.
 #[tokio::test]
-async fn cancel_take_back_clear_and_compact_from_a_denied_subject_are_refused_without_a_harness_dial(
-) {
+async fn each_agent_command_from_a_denied_subject_is_refused_without_a_harness_dial() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
     let svc = service(&k8s).await;
-    let within = Duration::from_secs(1);
-    let refusal = "a denied review must be refused before the harness is dialed";
-
-    let err = tokio::time::timeout(
-        within,
-        svc.cancel_turn(bearer(
-            ALICE_TOKEN,
-            CancelTurnRequest {
-                agent: "gamma".into(),
-            },
-        )),
-    )
-    .await
-    .expect(refusal)
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "CancelTurn");
-    assert!(
-        err.message()
-            .contains("caller cannot reach the named agent"),
-        "{err:?}"
-    );
-
-    let err = tokio::time::timeout(
-        within,
-        svc.take_back_message(bearer(
-            ALICE_TOKEN,
-            TakeBackMessageRequest {
-                agent: "gamma".into(),
-                sender: String::new(),
-            },
-        )),
-    )
-    .await
-    .expect(refusal)
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "TakeBackMessage");
-    assert!(
-        err.message()
-            .contains("caller cannot reach the named agent"),
-        "{err:?}"
-    );
-
-    let err = tokio::time::timeout(
-        within,
-        svc.clear_context(bearer(
-            ALICE_TOKEN,
-            ClearContextRequest {
-                agent: "gamma".into(),
-            },
-        )),
-    )
-    .await
-    .expect(refusal)
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "ClearContext");
-    assert!(
-        err.message()
-            .contains("caller cannot reach the named agent"),
-        "{err:?}"
-    );
-
-    let err = tokio::time::timeout(
-        within,
-        svc.compact_context(bearer(
-            ALICE_TOKEN,
-            CompactContextRequest {
-                agent: "gamma".into(),
-            },
-        )),
-    )
-    .await
-    .expect(refusal)
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "CompactContext");
-    assert!(
-        err.message()
-            .contains("caller cannot reach the named agent"),
-        "{err:?}"
-    );
+    let cases = [
+        (
+            "DispatchTool",
+            erased(svc.dispatch_tool(bearer(ALICE_TOKEN, call_tool("gamma")))),
+        ),
+        (
+            "CancelTurn",
+            erased(svc.cancel_turn(bearer(
+                ALICE_TOKEN,
+                CancelTurnRequest {
+                    agent: "gamma".into(),
+                },
+            ))),
+        ),
+        (
+            "TakeBackMessage",
+            erased(svc.take_back_message(bearer(
+                ALICE_TOKEN,
+                TakeBackMessageRequest {
+                    agent: "gamma".into(),
+                    sender: String::new(),
+                },
+            ))),
+        ),
+        (
+            "ClearContext",
+            erased(svc.clear_context(bearer(
+                ALICE_TOKEN,
+                ClearContextRequest {
+                    agent: "gamma".into(),
+                    sender: String::new(),
+                },
+            ))),
+        ),
+        (
+            "CompactContext",
+            erased(svc.compact_context(bearer(
+                ALICE_TOKEN,
+                CompactContextRequest {
+                    agent: "gamma".into(),
+                    sender: String::new(),
+                },
+            ))),
+        ),
+        (
+            "ListSubAgents",
+            erased(svc.list_sub_agents(bearer(
+                ALICE_TOKEN,
+                ListSubAgentsRequest {
+                    agent: "gamma".into(),
+                },
+            ))),
+        ),
+        (
+            "ReadSubAgentLog",
+            erased(svc.read_sub_agent_log(bearer(
+                ALICE_TOKEN,
+                ReadSubAgentLogRequest {
+                    agent: "gamma".into(),
+                    path: "scout".into(),
+                },
+            ))),
+        ),
+        (
+            "MessageSubAgent",
+            erased(svc.message_sub_agent(bearer(
+                ALICE_TOKEN,
+                MessageSubAgentRequest {
+                    agent: "gamma".into(),
+                    path: "scout".into(),
+                    text: "hello".into(),
+                    sender: String::new(),
+                },
+            ))),
+        ),
+        (
+            "StopSubAgent",
+            erased(svc.stop_sub_agent(bearer(
+                ALICE_TOKEN,
+                StopSubAgentRequest {
+                    agent: "gamma".into(),
+                    path: "scout".into(),
+                },
+            ))),
+        ),
+    ];
+    for (command, call) in cases {
+        let err = tokio::time::timeout(Duration::from_secs(1), call)
+            .await
+            .expect("a denied review must be refused before the harness is dialed")
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{command}");
+        assert!(
+            err.message()
+                .contains("caller cannot reach the named agent"),
+            "{command}: {err:?}"
+        );
+    }
 }
 
 /// No token at all is PermissionDenied before anything else runs. The

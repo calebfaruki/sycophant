@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -35,9 +36,10 @@ const testAgent = "a-test"
 // GetTurnState IDLE.
 // It records every CancelTurn and answers it cancelled, every
 // TakeBackMessage and answers it taken false, and every ClearContext and
-// CompactContext: clear empties the history, compact leaves it. None of
-// these sends a frame. These are the defaults; the set*, fail* and hold*
-// helpers change them.
+// CompactContext: clear empties the history, compact leaves it, and each
+// that succeeds sends its entry frame to every open stream, as the relay
+// does. These are the defaults; the set*, fail* and hold* helpers change
+// them.
 type fakeGateway struct {
 	relaypb.UnimplementedRelayGatewayServer
 
@@ -52,6 +54,7 @@ type fakeGateway struct {
 	historyErr     error
 	historyHold    chan struct{}
 	channelStreams int
+	open           []*fakeStream
 
 	streamCh chan *fakeStream
 	ingestCh chan struct{}
@@ -76,6 +79,12 @@ type fakeGateway struct {
 
 	receiveAgents []string
 	historyAgents []string
+
+	subAgents   []string
+	subAgentLog []*commonpb.HistoryEntry
+	// subAgentCh carries each ListSubAgents, ReadSubAgentLog,
+	// MessageSubAgent and StopSubAgent request.
+	subAgentCh chan any
 }
 
 // agentsNamed is a copy of the agent each ChannelStreamReceive and each
@@ -88,9 +97,11 @@ func (f *fakeGateway) agentsNamed() (receives, histories []string) {
 
 // fakeStream is one open ChannelStreamReceive. Frames pushed onto it are sent in
 // order; end() closes the stream after every pushed frame has gone out.
+// entries carries the frames a clear or compact sends.
 type fakeStream struct {
 	channelStreamID string
 	frames          chan *commonpb.ChannelStreamOutbound
+	entries         chan *commonpb.ChannelStreamOutbound
 	endOnce         sync.Once
 }
 
@@ -120,6 +131,7 @@ func startFakeGateway(t *testing.T) *fakeGateway {
 		cancelCh:   make(chan *commonpb.CancelTurnRequest, 16),
 		takeBackCh: make(chan *commonpb.TakeBackMessageRequest, 16),
 		contextCh:  make(chan string, 16),
+		subAgentCh: make(chan any, 16),
 	}
 	srv := grpc.NewServer()
 	relaypb.RegisterRelayGatewayServer(srv, f)
@@ -259,6 +271,7 @@ func (f *fakeGateway) ClearContext(
 	if err != nil {
 		return nil, err
 	}
+	f.sendEntry(commonpb.EntryKind_ENTRY_KIND_CLEAR)
 	return &commonpb.ClearContextResponse{}, nil
 }
 
@@ -273,7 +286,84 @@ func (f *fakeGateway) CompactContext(
 	if err != nil {
 		return nil, err
 	}
+	f.sendEntry(commonpb.EntryKind_ENTRY_KIND_COMPACT)
 	return &commonpb.CompactContextResponse{}, nil
+}
+
+func (f *fakeGateway) sendEntry(kind commonpb.EntryKind) {
+	frame := &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_SendMessage{
+		SendMessage: &commonpb.ChannelStreamSend{Kind: kind},
+	}}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.open {
+		s.entries <- frame
+	}
+}
+
+// setSubAgents makes ListSubAgents answer with paths.
+func (f *fakeGateway) setSubAgents(paths ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subAgents = append([]string(nil), paths...)
+}
+
+// setSubAgentLog makes ReadSubAgentLog answer with entries, whatever the
+// path.
+func (f *fakeGateway) setSubAgentLog(entries ...*commonpb.HistoryEntry) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subAgentLog = append([]*commonpb.HistoryEntry(nil), entries...)
+}
+
+// nextSubAgentCall waits for the next sub-agent request the client sends.
+func (f *fakeGateway) nextSubAgentCall(t *testing.T, timeout time.Duration) any {
+	t.Helper()
+	select {
+	case req := <-f.subAgentCh:
+		return req
+	case <-time.After(timeout):
+		t.Fatalf("client sent no sub-agent request within %v", timeout)
+		return nil
+	}
+}
+
+func (f *fakeGateway) ListSubAgents(
+	_ context.Context,
+	req *commonpb.ListSubAgentsRequest,
+) (*commonpb.ListSubAgentsResponse, error) {
+	f.mu.Lock()
+	paths := append([]string(nil), f.subAgents...)
+	f.mu.Unlock()
+	f.subAgentCh <- req
+	return &commonpb.ListSubAgentsResponse{Paths: paths}, nil
+}
+
+func (f *fakeGateway) ReadSubAgentLog(
+	_ context.Context,
+	req *commonpb.ReadSubAgentLogRequest,
+) (*commonpb.GetConversationHistoryResponse, error) {
+	f.mu.Lock()
+	entries := append([]*commonpb.HistoryEntry(nil), f.subAgentLog...)
+	f.mu.Unlock()
+	f.subAgentCh <- req
+	return &commonpb.GetConversationHistoryResponse{Entries: entries}, nil
+}
+
+func (f *fakeGateway) MessageSubAgent(
+	_ context.Context,
+	req *commonpb.MessageSubAgentRequest,
+) (*commonpb.MessageSubAgentResponse, error) {
+	f.subAgentCh <- req
+	return &commonpb.MessageSubAgentResponse{}, nil
+}
+
+func (f *fakeGateway) StopSubAgent(
+	_ context.Context,
+	req *commonpb.StopSubAgentRequest,
+) (*commonpb.StopSubAgentResponse, error) {
+	f.subAgentCh <- req
+	return &commonpb.StopSubAgentResponse{}, nil
 }
 
 // nextStream waits for the next ChannelStreamReceive the client opens.
@@ -401,8 +491,15 @@ func (f *fakeGateway) ChannelStreamReceive(
 	s := &fakeStream{
 		channelStreamID: fmt.Sprintf("chan-%d", f.channelStreams),
 		frames:          make(chan *commonpb.ChannelStreamOutbound, 64),
+		entries:         make(chan *commonpb.ChannelStreamOutbound, 16),
 	}
+	f.open = append(f.open, s)
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.open = slices.DeleteFunc(f.open, func(o *fakeStream) bool { return o == s })
+	}()
 
 	ack := &commonpb.ChannelStreamOutbound{
 		Command: &commonpb.ChannelStreamOutbound_Ack{Ack: &commonpb.ChannelStreamAck{ChannelStreamId: s.channelStreamID}},
@@ -419,6 +516,10 @@ func (f *fakeGateway) ChannelStreamReceive(
 			if !ok {
 				return nil
 			}
+			if err := stream.Send(frame); err != nil {
+				return err
+			}
+		case frame := <-s.entries:
 			if err := stream.Send(frame); err != nil {
 				return err
 			}
@@ -498,6 +599,20 @@ func userEntry(text string) *commonpb.HistoryEntry {
 
 func assistantEntry(text string) *commonpb.HistoryEntry {
 	return &commonpb.HistoryEntry{Message: &commonpb.Message{Role: "assistant", Content: textContent(text)}}
+}
+
+func sentBy(sender *commonpb.Sender, text string) *commonpb.HistoryEntry {
+	e := userEntry(text)
+	e.Sender = sender
+	return e
+}
+
+func personSender(subject string) *commonpb.Sender {
+	return &commonpb.Sender{From: &commonpb.Sender_Person{Person: subject}}
+}
+
+func parentAgentSender(agent string) *commonpb.Sender {
+	return &commonpb.Sender{From: &commonpb.Sender_ParentAgent{ParentAgent: agent}}
 }
 
 // turnStateFrame is a turn state for the turn of the user message messageID.

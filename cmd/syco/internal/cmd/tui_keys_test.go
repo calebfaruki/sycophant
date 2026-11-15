@@ -353,22 +353,8 @@ func TestTUIClearAndCompactCallTheirRPCsAndShowARefusal(t *testing.T) {
 	}
 }
 
-// beforeClear opens the TUI on a conversation holding one message.
-func beforeClear(t *testing.T) (*fakeGateway, *tuiDriver) {
-	t.Helper()
-	f, _ := newClientEnv(t)
-	f.setHistory(userEntry("UserBeforeClearPuffin"))
-	d := openTUI(t, f)
-	f.nextStream(t, 5*time.Second)
-	d.waitConnected()
-	d.waitView("the conversation", time.Now().Add(5*time.Second), func(string) bool {
-		return d.hasSentPanel("UserBeforeClearPuffin")
-	})
-	return f, d
-}
-
 func TestTUIClearLeavesOnlyTheConversationTheRelayReturns(t *testing.T) {
-	f, d := beforeClear(t)
+	f, d, _ := startedTUI(t, "UserBeforeClearPuffin")
 	d.typeEnter("/clear")
 	f.nextContext(t, 5*time.Second)
 	d.waitView("the clear notice", time.Now().Add(5*time.Second), func(string) bool {
@@ -380,7 +366,7 @@ func TestTUIClearLeavesOnlyTheConversationTheRelayReturns(t *testing.T) {
 }
 
 func TestTUICompactRedrawsTheConversation(t *testing.T) {
-	f, d := beforeClear(t)
+	f, d, _ := startedTUI(t, "UserBeforeClearPuffin")
 	d.typeEnter("/compact")
 	f.nextContext(t, 5*time.Second)
 	d.waitView("the compact notice", time.Now().Add(5*time.Second), func(string) bool {
@@ -394,7 +380,7 @@ func TestTUICompactRedrawsTheConversation(t *testing.T) {
 // A clear that ran shows so even when reading the conversation after it
 // fails.
 func TestTUIClearThatRanShowsItsNoticeThenTheReloadError(t *testing.T) {
-	f, d := beforeClear(t)
+	f, d, _ := startedTUI(t, "UserBeforeClearPuffin")
 	f.failHistory(status.Error(codes.Unavailable, "HistoryDownSkua"))
 	d.typeEnter("/clear")
 	f.nextContext(t, 5*time.Second)

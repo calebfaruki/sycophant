@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, Weak};
 use harness_proto::dispatch_link_server::DispatchLink;
 use harness_proto::{dispatch_frame, parent_frame, DispatchFrame, ParentFrame};
 use proto_common::{
-    ContentBlock, SendServerRequestAndAwaitRequest, SendServerRequestAndAwaitResponse, StreamItem,
-    TurnState, TurnStateEvent,
+    ContentBlock, EntryKind, SendServerRequestAndAwaitRequest, SendServerRequestAndAwaitResponse,
+    Sender, StreamItem, TurnState, TurnStateEvent,
 };
+use relay_proto::deliver_sub_agent_event_request::Event as SubAgentEvent;
 use shared::auth::{
     extract_bearer_token, K8sTokenVerifier, TokenVerifier, HARNESS_DISPATCH_AUDIENCE,
 };
@@ -39,7 +40,7 @@ struct Link {
     parent: String,
     namespace: String,
     verifier: Arc<dyn TokenVerifier>,
-    answer: watch::Sender<Option<String>>,
+    answer: watch::Sender<Option<dispatch_frame::Frame>>,
     /// The newest attach. Only its inbound task holds it, so it is gone
     /// once that stream ends.
     attached: watch::Sender<Option<Weak<Attach>>>,
@@ -142,18 +143,30 @@ impl RelayRpc for ParentLink {
         Ok(false)
     }
 
-    async fn deliver_reply(&mut self, content: Vec<ContentBlock>) -> Result<bool, String> {
+    async fn deliver_reply(
+        &mut self,
+        _kind: EntryKind,
+        content: Vec<ContentBlock>,
+    ) -> Result<bool, String> {
         let text = proto_common::content_text(&content);
-        self.link.answer.send_replace(Some(text));
+        self.link
+            .answer
+            .send_replace(Some(dispatch_frame::Frame::FinalAnswer(text)));
         Ok(true)
     }
 
-    /// A turn that ends with no reply holds `dispatch failed: <reason>`.
+    /// A sub-agent starts no sub-agents of its own, so it sends no events.
+    async fn deliver_sub_agent_event(&mut self, _event: SubAgentEvent) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// A turn that ends with no reply holds its reason as a failure.
     async fn deliver_turn_state(&mut self, turn_state: TurnStateEvent) -> Result<bool, String> {
         let ended = turn_state.state != TurnState::Working as i32;
         if ended && self.link.answer.borrow().is_none() {
-            let failed = format!("dispatch failed: {}", turn_state.reason);
-            self.link.answer.send_replace(Some(failed));
+            self.link
+                .answer
+                .send_replace(Some(dispatch_frame::Frame::Failure(turn_state.reason)));
         }
         Ok(true)
     }
@@ -204,7 +217,9 @@ impl DispatchLink for ParentLink {
                     Some(parent_frame::Frame::AnswerTaken(true)) => {
                         link.taken.send_replace(true);
                     }
-                    Some(parent_frame::Frame::Message(text)) => link.inbox.push(text),
+                    Some(parent_frame::Frame::Message(message)) => link
+                        .inbox
+                        .push(message.sender.unwrap_or_default(), message.text),
                     Some(parent_frame::Frame::Stop(true)) => {
                         link.stopped.send_replace(true);
                     }
@@ -214,12 +229,10 @@ impl DispatchLink for ParentLink {
             // Dropping the attach here ends a request still waiting on it.
         });
 
-        // The final answer goes to every attach, once it is held.
+        // The final answer or failure goes to every attach, once it is held.
         let answer = WatchStream::new(self.link.answer.subscribe())
             .filter_map(|answer| answer)
-            .map(|text| DispatchFrame {
-                frame: Some(dispatch_frame::Frame::FinalAnswer(text)),
-            })
+            .map(|frame| DispatchFrame { frame: Some(frame) })
             .map(Ok);
         let frames = ReceiverStream::new(rx).merge(answer);
         Ok(Response::new(Box::pin(frames)))
@@ -237,14 +250,18 @@ pub(crate) struct MandateSource {
 }
 
 impl MandateSource {
-    /// `path` is the dispatch's `<sub-agent>/<id>`.
-    pub(crate) fn new(path: impl Into<String>, mandate: impl Into<String>) -> Self {
+    /// `path` is the sub-agent's path, `<sub-agent>/<id>`, `agent` its parent agent.
+    pub(crate) fn new(
+        path: impl Into<String>,
+        mandate: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Self {
         let path = path.into();
         Self {
             mandate: Some(InboundMessage {
                 content: proto_common::text_content(&mandate.into()),
                 reply_channel_stream: Some(path.clone()),
-                sender: path.clone(),
+                sender: Sender::parent_agent(agent),
                 message_id: path,
             }),
         }
@@ -341,7 +358,7 @@ mod tests {
         let turns = ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "the answer", &[])]);
         let mut inference = turns.clone();
         let mut relay = link.clone();
-        let mut source = MandateSource::new(PATH, "summarize the repo");
+        let mut source = MandateSource::new(PATH, "summarize the repo", "one");
         let router = test_router(agent_state.clone());
         let instructions = test_instructions();
         let run = message_loop(
@@ -384,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_that_ends_with_no_reply_holds_dispatch_failed_and_its_reason() {
+    async fn a_turn_that_ends_with_no_reply_holds_its_reason_as_a_failure() {
         let link = sub_agent_link();
         let endpoint = serve(link.clone());
         let mut relay = link.clone();
@@ -401,7 +418,7 @@ mod tests {
             .expect("the parent attaches");
         assert_eq!(
             parent.next_frame().await,
-            final_answer("dispatch failed: model call failed")
+            Frame::Failure("model call failed".into())
         );
     }
 
@@ -411,7 +428,10 @@ mod tests {
         let endpoint = serve(link.clone());
         let mut relay = link.clone();
         let _ = relay
-            .deliver_reply(proto_common::text_content("the answer"))
+            .deliver_reply(
+                proto_common::EntryKind::Message,
+                proto_common::text_content("the answer"),
+            )
             .await;
         let ended = link.answer_taken();
         tokio::pin!(ended);

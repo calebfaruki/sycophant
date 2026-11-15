@@ -180,12 +180,36 @@ impl RelayInternal for InternalService {
             command: Some(channel_stream_outbound::Command::SendMessage(
                 ChannelStreamSend {
                     content: req.content,
+                    kind: req.kind,
                 },
             )),
         };
         let delivered = self.state.send_to_agent(&agent, send).await > 0;
         tracing::info!(agent = %agent, delivered = delivered, "deliver_reply fanned out");
         Ok(Response::new(relay_proto::DeliverReplyResponse {
+            delivered,
+        }))
+    }
+
+    async fn deliver_sub_agent_event(
+        &self,
+        request: Request<relay_proto::DeliverSubAgentEventRequest>,
+    ) -> Result<Response<relay_proto::DeliverSubAgentEventResponse>, Status> {
+        use relay_proto::deliver_sub_agent_event_request::Event;
+        let agent = self.verify_caller(&request).await?;
+        let Some(event) = request.into_inner().event else {
+            return Err(Status::invalid_argument("event required"));
+        };
+        let command = match event {
+            Event::Started(e) => channel_stream_outbound::Command::SubAgentStarted(e),
+            Event::Finished(e) => channel_stream_outbound::Command::SubAgentFinished(e),
+            Event::Stopped(e) => channel_stream_outbound::Command::SubAgentStopped(e),
+        };
+        let frame = ChannelStreamOutbound {
+            command: Some(command),
+        };
+        let delivered = self.state.send_to_agent(&agent, frame).await > 0;
+        Ok(Response::new(relay_proto::DeliverSubAgentEventResponse {
             delivered,
         }))
     }
@@ -244,7 +268,7 @@ fn clamp_await_secs(requested: u32) -> u32 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use proto_common::{ContentBlock, TurnState, TurnStateEvent};
+    use proto_common::{EntryKind, TurnState, TurnStateEvent};
 
     use crate::state::test_support::{make_state, mint_person};
 
@@ -370,28 +394,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_reply_fans_out_to_agent() {
+    async fn deliver_reply_fans_out_its_content_and_kind_to_agent() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
         let _id = mint_person(&state, "subject-ag", "ag", tx).await;
         let service = service_for(state, "ag");
+        let content = proto_common::text_content("summary");
         let resp = service
             .deliver_reply(authed(relay_proto::DeliverReplyRequest {
-                content: vec![ContentBlock {
-                    block: Some(proto_common::content_block::Block::Text(
-                        proto_common::TextBlock { text: "hi".into() },
-                    )),
-                }],
+                content: content.clone(),
+                kind: EntryKind::Compact as i32,
             }))
             .await
             .unwrap()
             .into_inner();
         assert!(resp.delivered);
         let frame = rx.recv().await.unwrap();
-        assert!(matches!(
+        assert_eq!(
             frame.command,
-            Some(channel_stream_outbound::Command::SendMessage(_))
-        ));
+            Some(channel_stream_outbound::Command::SendMessage(
+                ChannelStreamSend {
+                    content,
+                    kind: EntryKind::Compact as i32,
+                }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_sub_agent_event_reaches_every_channel_on_the_agent_unchanged() {
+        use channel_stream_outbound::Command;
+        use proto_common::{
+            sub_agent_finished, SubAgentFinished, SubAgentStarted, SubAgentStopped,
+        };
+        use relay_proto::deliver_sub_agent_event_request::Event;
+        let state = make_state();
+        let (tx_a, mut rx_a) = mpsc::channel(8);
+        let (tx_b, mut rx_b) = mpsc::channel(8);
+        mint_person(&state, "subject-a", "ag", tx_a).await;
+        mint_person(&state, "subject-b", "ag", tx_b).await;
+        let service = service_for(state, "ag");
+        let started = SubAgentStarted {
+            path: "scout".into(),
+        };
+        let finished = SubAgentFinished {
+            path: "scout".into(),
+            outcome: Some(sub_agent_finished::Outcome::Failure("pod died".into())),
+        };
+        let stopped = SubAgentStopped {
+            path: "scout".into(),
+        };
+        let cases = [
+            (
+                Event::Started(started.clone()),
+                Command::SubAgentStarted(started),
+            ),
+            (
+                Event::Finished(finished.clone()),
+                Command::SubAgentFinished(finished),
+            ),
+            (
+                Event::Stopped(stopped.clone()),
+                Command::SubAgentStopped(stopped),
+            ),
+        ];
+        for (event, want) in cases {
+            let resp = service
+                .deliver_sub_agent_event(authed(relay_proto::DeliverSubAgentEventRequest {
+                    event: Some(event),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(resp.delivered, "{want:?}");
+            assert_eq!(rx_a.recv().await.unwrap().command, Some(want.clone()));
+            assert_eq!(rx_b.recv().await.unwrap().command, Some(want));
+        }
     }
 
     #[tokio::test]

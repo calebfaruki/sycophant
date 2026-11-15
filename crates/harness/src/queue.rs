@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use proto_common::ContentBlock;
+use proto_common::{sender, ContentBlock, Sender};
 use tokio::sync::{Mutex, Notify};
 
 use crate::message_source::InboundMessage;
@@ -34,29 +34,31 @@ impl MessageQueue {
         self.items.lock().await.pop_front()
     }
 
-    /// Remove the newest queued message whose `sender` is `sender` and
-    /// return its content; `None` (nothing removed) when that person has
-    /// none queued. A message already taken for a turn is no longer queued,
-    /// so the running turn's message is never removed.
-    pub(crate) async fn take_back(&self, sender: &str) -> Option<Vec<ContentBlock>> {
+    /// Remove the newest queued message from the person `subject` and return
+    /// its content; `None` (nothing removed) when that person has none
+    /// queued. A message already taken for a turn is no longer queued, so the
+    /// running turn's message is never removed.
+    pub(crate) async fn take_back(&self, subject: &str) -> Option<Vec<ContentBlock>> {
         let mut items = self.items.lock().await;
-        let idx = items.iter().rposition(|m| m.sender == sender)?;
+        let idx = items.iter().rposition(
+            |m| matches!(&m.sender.from, Some(sender::From::Person(p)) if p == subject),
+        )?;
         items.remove(idx).map(|m| m.content)
     }
 }
 
-/// A sub-agent's messages from its agent or a person, folded into its turn
-/// before its next model request.
+/// A sub-agent's messages from its agent or a person, each with its sender,
+/// folded into its turn before its next model request.
 #[derive(Clone, Default)]
-pub(crate) struct Inbox(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+pub(crate) struct Inbox(std::sync::Arc<std::sync::Mutex<Vec<(Sender, String)>>>);
 
 impl Inbox {
-    pub(crate) fn push(&self, message: String) {
-        self.0.lock().unwrap().push(message);
+    pub(crate) fn push(&self, sender: Sender, message: String) {
+        self.0.lock().unwrap().push((sender, message));
     }
 
     /// Take every message, oldest first.
-    pub(crate) fn drain(&self) -> Vec<String> {
+    pub(crate) fn drain(&self) -> Vec<(Sender, String)> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
@@ -66,12 +68,11 @@ mod tests {
     use super::*;
     use proto_common::{content_text, text_content};
 
-    const ALICE: &str = "https://issuer.example#alice";
-    const BOB: &str = "https://issuer.example#bob";
+    use crate::test_doubles::{ALICE, BOB};
 
     fn item(sender: &str, text: &str) -> InboundMessage {
         InboundMessage {
-            sender: sender.to_string(),
+            sender: Sender::person(sender),
             content: text_content(text),
             reply_channel_stream: None,
             message_id: format!("mid-{text}"),
@@ -114,7 +115,7 @@ mod tests {
         );
 
         let next = queue.pop().await.unwrap();
-        assert_eq!(next.sender, BOB);
+        assert_eq!(next.sender, Sender::person(BOB));
         assert_eq!(
             content_text(&next.content),
             "B1",

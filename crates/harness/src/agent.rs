@@ -221,20 +221,21 @@ async fn fold_inbox(
     request: &mut TurnRequest,
 ) -> bool {
     let messages = inbox.drain();
-    for text in &messages {
+    let any = !messages.is_empty();
+    for (sender, text) in messages {
         let msg = Message {
             role: "user".into(),
-            content: vec![text_block(text.clone())],
+            content: vec![text_block(text)],
             tool_calls: vec![],
             tool_call_id: None,
             is_error: None,
         };
-        if let Err(e) = log.write().await.append(msg.clone()).await {
+        if let Err(e) = log.write().await.append_user(msg.clone(), sender).await {
             tracing::warn!(error = %e, "skipped persisting a message");
         }
         request.messages.push(msg);
     }
-    !messages.is_empty()
+    any
 }
 
 #[cfg(test)]
@@ -242,7 +243,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use proto_common::{content_block, CallToolResponse};
+    use proto_common::{content_block, CallToolResponse, Sender};
     use toolset_proto::TurnEvent;
 
     use crate::test_doubles::{
@@ -360,7 +361,7 @@ mod tests {
             _tool_call_id: &str,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
-            self.0.push(M.into());
+            self.0.push(Sender::parent_agent("one"), M.into());
             Ok(CallToolResponse {
                 content: vec![text_block("result".into())],
                 is_error: false,
@@ -378,7 +379,7 @@ mod tests {
             request: TurnRequest,
         ) -> Result<Box<dyn crate::clients::TurnSource>, String> {
             if self.0.requests().is_empty() {
-                self.1.push(M.into());
+                self.1.push(Sender::parent_agent("one"), M.into());
             }
             self.0.turn(request).await
         }
@@ -463,6 +464,44 @@ mod tests {
                 "{stop:?}: the log holds the message before the answer"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn each_folded_inbox_message_is_logged_from_its_own_sender() {
+        let inbox = Inbox::default();
+        inbox.push(Sender::person("alice"), "from alice".into());
+        inbox.push(
+            Sender::sub_agent("sub/0a1b2c3d"),
+            "from the sub-agent".into(),
+        );
+        inbox.push(Sender::parent_agent("one"), "from the parent".into());
+        let log = fresh_log();
+        let mut request = user_request(None);
+
+        assert!(fold_inbox(&inbox, &log, &mut request).await);
+
+        let logged: Vec<_> = log
+            .read()
+            .await
+            .snapshot(None)
+            .entries
+            .into_iter()
+            .map(|e| (e.sender, content_text(&e.message.content)))
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                (Some(Sender::person("alice")), "from alice".to_string()),
+                (
+                    Some(Sender::sub_agent("sub/0a1b2c3d")),
+                    "from the sub-agent".to_string()
+                ),
+                (
+                    Some(Sender::parent_agent("one")),
+                    "from the parent".to_string()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

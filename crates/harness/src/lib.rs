@@ -70,6 +70,22 @@ fn probe_dir_writable(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A sub-agent's mandate, sent by its parent agent. An agent has none.
+pub(crate) fn mandate_source(config: &HarnessConfig) -> Option<MandateSource> {
+    match &config.mode {
+        Mode::Dispatch {
+            path,
+            mandate,
+            parent,
+        } => Some(MandateSource::new(
+            path.clone(),
+            mandate.clone(),
+            parent.clone(),
+        )),
+        Mode::Agent { .. } => None,
+    }
+}
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = HarnessConfig::from_env().map_err(|e| format!("config error: {e}"))?;
 
@@ -160,6 +176,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .to_path_buf(),
                     token_path: shared::auth::HARNESS_DISPATCH_TOKEN_PATH.into(),
                     endpoint: dispatch_hub::cluster_endpoint(agent.clone(), namespace.clone()),
+                    attach_window: dispatch_hub::ATTACH_WINDOW,
                 },
                 dispatch_hub::kube_jobs(client, namespace.clone()),
                 dispatch_hub::srv_list(agent, namespace),
@@ -171,6 +188,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None,
     };
+    let entry_relay = seam.clone();
     let mut router = tool_router::ToolRouter::new(
         instructions.clone(),
         config.agent.clone(),
@@ -289,7 +307,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut inference = inference_factory();
     let idle_gap = std::time::Duration::from_secs(config.idle_gap_secs);
 
-    if let (Mode::Dispatch { path, mandate, .. }, Some(link)) = (&config.mode, link) {
+    if let (Mode::Dispatch { path, .. }, Some(mut source), Some(link)) =
+        (&config.mode, mandate_source(&config), link)
+    {
         let addr: SocketAddr = ([0, 0, 0, 0], DISPATCH_LINK_PORT).into();
         let server = Server::builder()
             .add_service(harness_proto::dispatch_link_server::DispatchLinkServer::new(link.clone()))
@@ -301,7 +321,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
         tracing::info!(dispatch_link = %addr, path = %path, "dispatch link listening");
 
-        let mut source = MandateSource::new(path.clone(), mandate.clone());
         let mut relay_deliver = link.clone();
         let turns = runtime_entrypoint::message_loop(
             config.max_iterations,
@@ -342,6 +361,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let svc = grpc_server::HarnessService::new(
             grpc_router_handle,
             grpc_agent_state_handle,
+            entry_relay,
             inference_factory,
             idle_gap,
         );
@@ -430,5 +450,37 @@ mod probe_tests {
             msg.contains("is not writable"),
             "the error must state the not-writable condition, got {msg:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mandate_tests {
+    use crate::config::{HarnessConfig, Mode};
+    use crate::message_source::MessageSource;
+
+    #[tokio::test]
+    async fn a_sub_agents_mandate_comes_from_its_parent_agent_not_from_itself() {
+        let config = HarnessConfig {
+            mode: Mode::Dispatch {
+                path: "sub/0a1b2c3d".to_string(),
+                mandate: "summarize the repo".to_string(),
+                parent: "one".to_string(),
+            },
+            instructions_root: std::path::PathBuf::new(),
+            agent: "sub".to_string(),
+            max_iterations: 5,
+            idle_gap_secs: 30,
+            namespace: "tenant-a".to_string(),
+            toolsets: vec![],
+            toolset_secrets: std::collections::HashMap::new(),
+            scheduling_file: String::new(),
+            capability_service: "ag-sub-capability".to_string(),
+            model: None,
+            archives: 10,
+        };
+
+        let mut source = super::mandate_source(&config).expect("a sub-agent has a mandate");
+        let mandate = source.next_message().await.unwrap();
+        assert_eq!(mandate.sender, proto_common::Sender::parent_agent("one"));
     }
 }

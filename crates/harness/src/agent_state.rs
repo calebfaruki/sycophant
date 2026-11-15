@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use proto_common::{text_block, Message};
+use proto_common::{text_block, Message, Sender};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -66,15 +66,18 @@ impl AgentState {
         } else {
             paths.join(", ")
         };
-        log.append(Message {
-            role: "user".into(),
-            content: vec![text_block(format!(
-                "[agent restarted] Alive sub-agent dispatches: {alive}"
-            ))],
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        })
+        log.append_user(
+            Message {
+                role: "user".into(),
+                content: vec![text_block(format!(
+                    "[agent restarted] Alive sub-agent dispatches: {alive}"
+                ))],
+                tool_calls: vec![],
+                tool_call_id: None,
+                is_error: None,
+            },
+            Sender::sycophant(),
+        )
         .await
     }
 
@@ -342,6 +345,16 @@ mod tests {
         state.note_restart(&["sub/0a1b2c3d".into()]).await.unwrap();
         let window = state.log().read().await.history_for_provider().len();
         assert_eq!(window, 0, "an empty log gets no note");
+        state
+            .log()
+            .write()
+            .await
+            .clear(Sender::sycophant())
+            .await
+            .unwrap();
+        state.note_restart(&[]).await.unwrap();
+        let after_clear = state.log().read().await.snapshot(None).entries.len();
+        assert_eq!(after_clear, 1, "a cleared log gets no note");
 
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("conversation.log"), record("user", "hi")).unwrap();
@@ -356,22 +369,29 @@ mod tests {
         second.note_restart(&[]).await.unwrap();
 
         let conv = std::fs::read_to_string(tmp.path().join("conversation.log")).unwrap();
-        let entries: Vec<(String, String)> = parse_ndjson::<LogEntry>(&conv, "conversation.log")
-            .iter()
-            .map(|e| (e.role.clone(), content_text(&e.content)))
-            .collect();
-        let entry = |text: &str| ("user".to_string(), text.to_string());
+        let entries: Vec<(String, String, Option<proto_common::Sender>)> =
+            parse_ndjson::<LogEntry>(&conv, "conversation.log")
+                .iter()
+                .map(|e| (e.role.clone(), content_text(&e.content), e.sender.clone()))
+                .collect();
+        let note = |text: &str| {
+            (
+                "user".to_string(),
+                text.to_string(),
+                Some(Sender::sycophant()),
+            )
+        };
         assert_eq!(
             entries,
             [
-                entry("hi"),
-                entry(
+                ("user".to_string(), "hi".to_string(), None),
+                note(
                     "[agent restarted] Alive sub-agent dispatches: \
                      sub/0a1b2c3d, two/12345678"
                 ),
-                entry("[agent restarted] Alive sub-agent dispatches: none"),
+                note("[agent restarted] Alive sub-agent dispatches: none"),
             ],
-            "each start writes one note naming the alive paths, or none"
+            "each start writes one note from sycophant naming the alive paths, or none"
         );
         assert!(
             second.queue().pop().await.is_none(),

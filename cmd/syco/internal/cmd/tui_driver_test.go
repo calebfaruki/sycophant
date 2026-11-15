@@ -197,6 +197,21 @@ func connectedTUI(t *testing.T) (*fakeGateway, *tuiDriver, *fakeStream) {
 	return f, d, stream
 }
 
+// startedTUI opens the TUI on a conversation holding one message, so the
+// transcript shows, and waits until that message is drawn.
+func startedTUI(t *testing.T, text string) (*fakeGateway, *tuiDriver, *fakeStream) {
+	t.Helper()
+	f, _ := newClientEnv(t)
+	f.setHistory(userEntry(text))
+	d := openTUI(t, f)
+	stream := f.nextStream(t, 5*time.Second)
+	d.waitConnected()
+	d.waitView("the conversation", time.Now().Add(5*time.Second), func(string) bool {
+		return rowIndex(d.transcriptLines(), text) >= 0
+	})
+	return f, d, stream
+}
+
 // tuiTurn opens the TUI as connectedTUI does, sends a message, and marks
 // its turn (message msgID) running.
 func tuiTurn(t *testing.T, msgID string) (*fakeGateway, *tuiDriver, *fakeStream) {

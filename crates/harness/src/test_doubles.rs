@@ -2,13 +2,16 @@
 //! modules.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use proto_common::tool_result_frame::Frame;
 use proto_common::{
-    ContentBlock, StreamItem, ToolComplete, ToolOutcome, ToolResultFrame, TurnStateEvent,
+    text_content, ContentBlock, EntryKind, Message, StreamItem, ToolComplete, ToolOutcome,
+    ToolResultFrame, TurnStateEvent,
 };
+use relay_proto::deliver_sub_agent_event_request::Event as SubAgentEvent;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{ToolDecl, ToolsetConfig, ToolsetEntry};
 use tokio_util::sync::CancellationToken;
@@ -16,13 +19,15 @@ use toolset_proto::{turn_event, TurnEvent, TurnRequest};
 
 use crate::agent_state::AgentState;
 use crate::clients::{InferenceRpc, RelayRpc, ServerRequestOutcome, TurnSource};
-use crate::conversation::{ConversationLog, LocalFsStore};
+use crate::conversation::{ConversationLog, ConversationStore, LocalFsStore, LogEntry};
 use crate::dispatch::{ActiveJob, DispatchState};
 use crate::instructions::Instructions;
 use crate::tool_router::ToolRouter;
 
 /// The agent name used by test routers/instructions.
 pub(crate) const TEST_AG: &str = "ag";
+pub(crate) const ALICE: &str = "https://issuer.example#alice";
+pub(crate) const BOB: &str = "https://issuer.example#bob";
 
 /// An empty-agent instructions over a throwaway temp dir. The dir is leaked so
 /// the returned `Arc<Instructions>` can outlive this call; tests that need populated
@@ -121,6 +126,81 @@ pub(crate) fn record(role: &str, text: &str) -> String {
     )
 }
 
+pub(crate) fn text_msg(role: &str, text: &str) -> Message {
+    Message {
+        role: role.into(),
+        content: text_content(text),
+        tool_calls: vec![],
+        tool_call_id: None,
+        is_error: None,
+    }
+}
+
+/// What the test store's `archive` does in place of logrotate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ArchiveStep {
+    /// conversation.log becomes conversation.log.1.gz; Ok.
+    RenameOk,
+    /// Nothing on disk changes; Err.
+    ErrUntouched,
+}
+
+/// A store on a real LocalFsStore that stands in for logrotate in
+/// `archive` and can refuse every append.
+pub(crate) struct ArchiveStub {
+    inner: LocalFsStore,
+    root: PathBuf,
+    step: ArchiveStep,
+    pub(crate) fail_append: bool,
+}
+
+impl ArchiveStub {
+    pub(crate) fn new(root: &Path, step: ArchiveStep) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.to_path_buf(), 10),
+            root: root.to_path_buf(),
+            step,
+            fail_append: false,
+        }
+    }
+}
+
+#[async_trait]
+impl ConversationStore for ArchiveStub {
+    async fn append_event(&self, entry: &LogEntry) -> Result<(), String> {
+        if self.fail_append {
+            return Err("append refused by the test store".into());
+        }
+        self.inner.append_event(entry).await
+    }
+
+    async fn read_all(&self) -> Result<Vec<LogEntry>, String> {
+        self.inner.read_all().await
+    }
+
+    async fn clear(&self) -> Result<(), String> {
+        self.inner.clear().await
+    }
+
+    async fn archive(&self) -> Result<(), String> {
+        match self.step {
+            ArchiveStep::RenameOk => {
+                std::fs::rename(
+                    self.root.join("conversation.log"),
+                    self.root.join("conversation.log.1.gz"),
+                )
+                .unwrap();
+                Ok(())
+            }
+            ArchiveStep::ErrUntouched => Err("archive failed".into()),
+        }
+    }
+
+    async fn read_archive(&self, n: u64) -> Result<Option<Vec<LogEntry>>, String> {
+        self.inner.read_archive(n).await
+    }
+}
+
 /// A shared, ordered log of what happened in a test, so a test can order
 /// relay requests against pod claims and model turns.
 pub(crate) type EventLog = Arc<Mutex<Vec<String>>>;
@@ -160,6 +240,8 @@ pub(crate) struct RelayRequest {
 struct ScriptedRelayState {
     script: VecDeque<RelayAnswer>,
     requests: Vec<RelayRequest>,
+    entries: Vec<(EntryKind, String)>,
+    sub_agent_events: Vec<SubAgentEvent>,
 }
 
 /// A relay whose clones share one record and one script. Each
@@ -198,6 +280,16 @@ impl ScriptedRelay {
             .filter(|r| r.method == method)
             .cloned()
             .collect()
+    }
+
+    /// The entries sent through the message hook, in order.
+    pub(crate) fn entries(&self) -> Vec<(EntryKind, String)> {
+        self.state.lock().unwrap().entries.clone()
+    }
+
+    /// The sub-agent events sent, in order.
+    pub(crate) fn sub_agent_events(&self) -> Vec<SubAgentEvent> {
+        self.state.lock().unwrap().sub_agent_events.clone()
     }
 }
 
@@ -243,10 +335,23 @@ impl RelayRpc for ScriptedRelay {
     async fn deliver_stream_item(&mut self, _item: StreamItem) -> Result<bool, String> {
         Ok(true)
     }
-    async fn deliver_reply(&mut self, _content: Vec<ContentBlock>) -> Result<bool, String> {
+    async fn deliver_reply(
+        &mut self,
+        kind: EntryKind,
+        content: Vec<ContentBlock>,
+    ) -> Result<bool, String> {
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .push((kind, proto_common::content_text(&content)));
         Ok(true)
     }
     async fn deliver_turn_state(&mut self, _turn_state: TurnStateEvent) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn deliver_sub_agent_event(&mut self, event: SubAgentEvent) -> Result<bool, String> {
+        self.state.lock().unwrap().sub_agent_events.push(event);
         Ok(true)
     }
 }

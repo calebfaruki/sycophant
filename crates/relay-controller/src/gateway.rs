@@ -31,8 +31,10 @@ use proto_common::{
     ChannelStreamReceiveRequest, ClearContextRequest, ClearContextResponse, CompactContextRequest,
     CompactContextResponse, DispatchToolResponse, GetConversationHistoryRequest,
     GetConversationHistoryResponse, GetTurnStateRequest, ListAgentsRequest, ListAgentsResponse,
-    TakeBackMessageRequest, TakeBackMessageResponse, ToolListUpdate, ToolResultFrame,
-    TurnStateEvent, UserMessage, WatchToolsRequest,
+    ListSubAgentsRequest, ListSubAgentsResponse, MessageSubAgentRequest, MessageSubAgentResponse,
+    ReadSubAgentLogRequest, StopSubAgentRequest, StopSubAgentResponse, TakeBackMessageRequest,
+    TakeBackMessageResponse, ToolListUpdate, ToolResultFrame, TurnStateEvent, UserMessage,
+    WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use relay_proto::{DiscoverRequest, DiscoverResponse};
@@ -381,6 +383,15 @@ impl GatewayService {
         Ok(subject)
     }
 
+    async fn authorized_harness<T>(
+        &self,
+        request: &Request<T>,
+        agent: &str,
+    ) -> Result<(String, HarnessClient), Status> {
+        let subject = self.authorize_agent(request, agent).await?;
+        Ok((subject, self.harness(agent).await?))
+    }
+
     /// Authorize a receive stream and resolve the subject it serves. A
     /// person token is its own subject; a channel's sender resolves
     /// through the operator's handle binding. Either way the named
@@ -472,8 +483,7 @@ impl RelayGateway for GatewayService {
         request: Request<GetConversationHistoryRequest>,
     ) -> Result<Response<GetConversationHistoryResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
+        let (_, mut client) = self.authorized_harness(&request, &agent).await?;
         client
             .as_mut()
             .get_conversation_history(request.into_inner())
@@ -494,8 +504,7 @@ impl RelayGateway for GatewayService {
         request: Request<CancelTurnRequest>,
     ) -> Result<Response<CancelTurnResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
+        let (_, mut client) = self.authorized_harness(&request, &agent).await?;
         client.as_mut().cancel_turn(request.into_inner()).await
     }
 
@@ -504,8 +513,7 @@ impl RelayGateway for GatewayService {
         request: Request<TakeBackMessageRequest>,
     ) -> Result<Response<TakeBackMessageResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
+        let (subject, mut client) = self.authorized_harness(&request, &agent).await?;
         client
             .as_mut()
             .take_back_message(TakeBackMessageRequest {
@@ -522,9 +530,11 @@ impl RelayGateway for GatewayService {
         request: Request<ClearContextRequest>,
     ) -> Result<Response<ClearContextResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
-        client.as_mut().clear_context(request.into_inner()).await
+        let (sender, mut client) = self.authorized_harness(&request, &agent).await?;
+        client
+            .as_mut()
+            .clear_context(ClearContextRequest { agent, sender })
+            .await
     }
 
     async fn compact_context(
@@ -532,9 +542,58 @@ impl RelayGateway for GatewayService {
         request: Request<CompactContextRequest>,
     ) -> Result<Response<CompactContextResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
-        client.as_mut().compact_context(request.into_inner()).await
+        let (sender, mut client) = self.authorized_harness(&request, &agent).await?;
+        client
+            .as_mut()
+            .compact_context(CompactContextRequest { agent, sender })
+            .await
+    }
+
+    async fn list_sub_agents(
+        &self,
+        request: Request<ListSubAgentsRequest>,
+    ) -> Result<Response<ListSubAgentsResponse>, Status> {
+        let (_, mut client) = self
+            .authorized_harness(&request, &request.get_ref().agent)
+            .await?;
+        client.as_mut().list_sub_agents(request.into_inner()).await
+    }
+
+    async fn read_sub_agent_log(
+        &self,
+        request: Request<ReadSubAgentLogRequest>,
+    ) -> Result<Response<GetConversationHistoryResponse>, Status> {
+        let (_, mut client) = self
+            .authorized_harness(&request, &request.get_ref().agent)
+            .await?;
+        client
+            .as_mut()
+            .read_sub_agent_log(request.into_inner())
+            .await
+    }
+
+    async fn message_sub_agent(
+        &self,
+        request: Request<MessageSubAgentRequest>,
+    ) -> Result<Response<MessageSubAgentResponse>, Status> {
+        let (sender, mut client) = self
+            .authorized_harness(&request, &request.get_ref().agent)
+            .await?;
+        let req = request.into_inner();
+        client
+            .as_mut()
+            .message_sub_agent(MessageSubAgentRequest { sender, ..req })
+            .await
+    }
+
+    async fn stop_sub_agent(
+        &self,
+        request: Request<StopSubAgentRequest>,
+    ) -> Result<Response<StopSubAgentResponse>, Status> {
+        let (_, mut client) = self
+            .authorized_harness(&request, &request.get_ref().agent)
+            .await?;
+        client.as_mut().stop_sub_agent(request.into_inner()).await
     }
 
     async fn channel_stream_ingest(
@@ -778,9 +837,12 @@ impl RelayGateway for GatewayService {
         request: Request<CallToolRequest>,
     ) -> Result<Response<DispatchToolResponse>, Status> {
         let agent = request.get_ref().agent.clone();
-        let subject = self.authorize_agent(&request, &agent).await?;
-        let mut client = self.harness(&agent).await?;
-        let resp = client.as_mut().dispatch_tool(request.into_inner()).await?;
+        let (subject, mut client) = self.authorized_harness(&request, &agent).await?;
+        let req = CallToolRequest {
+            sender: subject.clone(),
+            ..request.into_inner()
+        };
+        let resp = client.as_mut().dispatch_tool(req).await?;
         let call_id = resp.get_ref().call_id.clone();
         self.state
             .record_dispatched_call(&call_id, &subject, &agent)

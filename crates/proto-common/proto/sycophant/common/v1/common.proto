@@ -53,6 +53,27 @@ message Message {
   optional bool is_error = 5;
 }
 
+// Who sent a user entry.
+message Sender {
+  oneof from {
+    // The person's authenticated subject.
+    string person = 1;
+    // The sub-agent's path, `<sub-agent>/<id>`.
+    string sub_agent = 2;
+    // The parent agent's name.
+    string parent_agent = 3;
+    bool sycophant = 4;
+  }
+}
+
+// What a conversation entry is. A clear entry has no content and the model
+// never sees it.
+enum EntryKind {
+  ENTRY_KIND_MESSAGE = 0;
+  ENTRY_KIND_CLEAR = 1;
+  ENTRY_KIND_COMPACT = 2;
+}
+
 enum StopReason {
   STOP_REASON_UNSPECIFIED = 0;
   END_TURN = 1;
@@ -85,6 +106,9 @@ message ChannelStreamOutbound {
     ServerRequest server_request = 4;
     StreamItem stream_item = 5;
     Heartbeat heartbeat = 7;
+    SubAgentStarted sub_agent_started = 10;
+    SubAgentFinished sub_agent_finished = 11;
+    SubAgentStopped sub_agent_stopped = 12;
   }
   reserved 6, 8, 9;
   reserved "catch_up_complete", "replay_impossible";
@@ -94,6 +118,25 @@ message ChannelStreamOutbound {
 // heartbeat interval.
 message Heartbeat {
   reserved 1;
+}
+
+// --- Sub-agent events ---
+
+message SubAgentStarted {
+  string path = 1;
+}
+
+// A sub-agent's turn ended: its final answer, or why it failed.
+message SubAgentFinished {
+  string path = 1;
+  oneof outcome {
+    string answer = 2;
+    string failure = 3;
+  }
+}
+
+message SubAgentStopped {
+  string path = 1;
 }
 
 // --- Streamed activity items (client-harness protocol, first slice) ---
@@ -147,6 +190,7 @@ message ChannelStreamSend {
   repeated ContentBlock content = 1;
   reserved 2;
   reserved "conversation_id";
+  EntryKind kind = 3;
 }
 
 // Streaming turn-lifecycle phase of the agent's one conversation. The state
@@ -234,6 +278,9 @@ message HistoryEntry {
   Message message = 3;
   reserved 4;
   reserved "tag";
+  // Set on a user entry.
+  Sender sender = 5;
+  EntryKind kind = 6;
 }
 
 message GetTurnStateRequest {
@@ -268,9 +315,13 @@ message TakeBackMessageResponse {
   repeated ContentBlock content = 2;
 }
 
-// Empty the agent's conversation log in place; nothing is archived.
+// Cut the agent's conversation log in place to one clear entry; nothing is
+// archived.
 message ClearContextRequest {
   string agent = 1;
+  // Set only by the relay, to the caller's authenticated subject; any
+  // client-supplied value is ignored.
+  string sender = 2;
 }
 
 message ClearContextResponse {}
@@ -279,9 +330,46 @@ message ClearContextResponse {}
 // first entry is a summary of the closed one, written by the agent's model.
 message CompactContextRequest {
   string agent = 1;
+  // Set only by the relay, to the caller's authenticated subject; any
+  // client-supplied value is ignored.
+  string sender = 2;
 }
 
 message CompactContextResponse {}
+
+// --- Sub-agent commands ---
+
+message ListSubAgentsRequest {
+  string agent = 1;
+}
+
+message ListSubAgentsResponse {
+  // The paths, `<sub-agent>/<id>`, of the agent's ready sub-agents.
+  repeated string paths = 1;
+}
+
+message ReadSubAgentLogRequest {
+  string agent = 1;
+  string path = 2;
+}
+
+message MessageSubAgentRequest {
+  string agent = 1;
+  string path = 2;
+  string text = 3;
+  // Set only by the relay, to the caller's authenticated subject; any
+  // client-supplied value is ignored.
+  string sender = 4;
+}
+
+message MessageSubAgentResponse {}
+
+message StopSubAgentRequest {
+  string agent = 1;
+  string path = 2;
+}
+
+message StopSubAgentResponse {}
 
 // --- Tool dispatch ---
 
@@ -311,6 +399,9 @@ message CallToolRequest {
   // The agent the call runs in. The relay authorizes it against the
   // caller's live reach before forwarding.
   string agent = 4;
+  // Set only by the relay, to the caller's authenticated subject; any
+  // client-supplied value is ignored.
+  string sender = 5;
 }
 
 message CallToolResponse {

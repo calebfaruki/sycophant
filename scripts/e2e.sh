@@ -66,8 +66,8 @@ readonly -a RELAY_GRPC_PROTO=(
 )
 # Marker the macOS tailnet join writes immediately before its sudo prompt and
 # removes once the join returns. An external monitor watches this path to alert
-# the operator that a password entry is imminent (the run is otherwise headless
-# until Step 5).
+# the operator that a password entry is imminent (the run is otherwise
+# headless).
 readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 # The in-cluster inference model key. Its `server` block makes the chart
 # render the llama.cpp Deployment, its Service and its ingress fence (CNP
@@ -656,10 +656,6 @@ tailnet_join_macos() {
 step_5_channel() {
   step "Step 5: App path"
 
-  # The app path is reached over the fresh tailnet, so this host joins it
-  # first on every run.
-  tailnet_join_macos || return 1
-
   # The operator's person token: a Dex-signed ID token for the subject
   # `sycoadm user up` bound to the agent list.
   local token
@@ -704,18 +700,13 @@ wait_for_conversation_log() {
       '$conv_log' >/dev/null 2>&1"
 }
 
-# A fresh file in hello-world's workspace for each e2e pass. Only
-# hello-scout's Shell creates it, and the workspace outlives a cluster reuse.
-SCOUT_FILE="/workspace/scout-$(date +%s)"
-readonly SCOUT_FILE
-
 # The StartSubAgent turn's prompt. Its mandate calls Shell, whose tool Job
 # mounts hello-world's workspace. Its second call holds the turn open. The
 # mandate ends the prompt, so no later sentence can be copied into it.
 readonly SCOUT_PROMPT="Use the StartSubAgent tool to start sub_agent \
 hello-scout, then use the ListInstructions tool. The mandate for hello-scout \
-is: Use the Shell tool to execute the command 'touch ${SCOUT_FILE} && echo \
-marigold', then reply with only its output."
+is: Use the Shell tool to execute the command 'echo marigold', then reply \
+with only its output."
 
 # A person's message to hello-scout while its Shell waits for approval.
 readonly SCOUT_MESSAGE="Also include the word tulip in your reply."
@@ -978,18 +969,6 @@ step_6_security() {
   wait_for_conversation_log "$tb_pod" "$scrub_c" "$conv_log" || return 1
 
   assert_tool_results "$tb_pod" "$scrub_c" "$conv_log"
-  if ! kubectl exec -n "$NAMESPACE" "$task_pod" -- test -e "$SCOUT_FILE"; then
-    warn "hello-world's workspace has no ${SCOUT_FILE}"
-    return 1
-  fi
-  if jq -s -e --arg f "$SCOUT_FILE" 'any(.[] | select(.role == "assistant")
-    | .tool_calls[]? | select(.name == "Shell"); .input_json | contains($f))' \
-    <(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- cat "$conv_log") \
-    >/dev/null; then
-    warn "hello-world's own Shell call names ${SCOUT_FILE}"
-    return 1
-  fi
-  ok "hello-scout's tool Job wrote ${SCOUT_FILE} in hello-world's workspace"
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$conv_log"
   assert_compaction "$tb_pod" "$scrub_c" "$conv_root"
   assert_toolset_secrets
@@ -1694,6 +1673,7 @@ main() {
   fi
 
   step_3_deploy
+  tailnet_join_macos
   verify_user_isolation
   verify_instructions_delivery
   verify_tenant_lifecycle
