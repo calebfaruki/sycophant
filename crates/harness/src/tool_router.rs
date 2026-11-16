@@ -427,9 +427,9 @@ impl ToolRouter {
         input_json: &str,
         has_client: bool,
         tool_call_id: &str,
-        // The parent turn's cancel token. The approval request and the
-        // `Toolset` and `ChannelStream` arms race it against their wait; a
-        // `Runtime` tool ignores it.
+        // The parent turn's cancel token. The approval request and every
+        // arm race it against their wait. `StartSubAgent` runs to the end
+        // and then stops the sub-agent it started.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
         let source = self
@@ -456,19 +456,45 @@ impl ToolRouter {
                     .await
             }
             Source::Runtime => match &self.hub {
-                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name) => {
+                Some(hub) if name == runtime_tools::START_SUB_AGENT_TOOL_NAME => {
                     let sender = hub.agent_sender();
-                    Ok(runtime_tools::dispatch_sub_agent_tool(name, input_json, hub, sender).await)
+                    let resp =
+                        runtime_tools::dispatch_sub_agent_tool(name, input_json, hub, sender).await;
+                    if !cancel.is_cancelled() {
+                        return Ok(resp);
+                    }
+                    if !resp.is_error {
+                        hub.stop_once_attached(&proto_common::content_text(&resp.content))
+                            .await;
+                    }
+                    Err(DispatchAbort::Cancelled)
                 }
-                _ => runtime_tools::dispatch(
-                    name,
-                    input_json,
-                    &self.instructions,
-                    &self.agent,
-                    &self.agent_state,
-                )
-                .await
-                .map_err(DispatchAbort::Error),
+                hub => {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => Err(DispatchAbort::Cancelled),
+                        outcome = async {
+                            match hub {
+                                Some(hub) if runtime_tools::SUB_AGENT_TOOLS.contains(&name) => {
+                                    let sender = hub.agent_sender();
+                                    Ok(runtime_tools::dispatch_sub_agent_tool(
+                                        name, input_json, hub, sender,
+                                    )
+                                    .await)
+                                }
+                                _ => runtime_tools::dispatch(
+                                    name,
+                                    input_json,
+                                    &self.instructions,
+                                    &self.agent,
+                                    &self.agent_state,
+                                )
+                                .await
+                                .map_err(DispatchAbort::Error),
+                            }
+                        } => outcome,
+                    }
+                }
             },
             Source::ChannelStream => {
                 let mut gateway = self.relay_rpc().ok_or_else(|| {
@@ -579,12 +605,12 @@ impl ToolRouter {
     /// frames on `await_client_tool`.
     ///
     /// An unknown name is answered here, before anything is spawned.
-    /// `sender` is the subject of the person who made the call.
+    /// `sender` is the person who made the call.
     pub(crate) async fn dispatch_client_tool(
         &self,
         name: &str,
         input_json: &str,
-        sender: &str,
+        sender: Sender,
     ) -> Result<String, String> {
         match self
             .source_of(name)
@@ -592,7 +618,7 @@ impl ToolRouter {
         {
             Source::Toolset => self.dispatch_client_toolset_tool(name, input_json).await,
             Source::Runtime => {
-                self.dispatch_client_runtime_tool(name, input_json, Sender::person(sender))
+                self.dispatch_client_runtime_tool(name, input_json, sender)
                     .await
             }
             // A channel-stream tool executes on the user's own device via a
@@ -1123,6 +1149,24 @@ mod tests {
         );
     }
 
+    // A runtime tool whose turn is stopped while the user approves it ends
+    // Cancelled, so the stop saves it as stopped rather than as worked.
+    #[tokio::test]
+    async fn a_runtime_tool_in_a_cancelled_turn_returns_cancelled() {
+        let cancel = CancellationToken::new();
+        let router =
+            empty_router().with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
+                cancel.clone(),
+            )]));
+        let outcome = router
+            .call_tool("Think", r#"{"note":"n"}"#, false, "tc", &cancel)
+            .await;
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "got {outcome:?}"
+        );
+    }
+
     // The in-process dispatch arm converts the model's arg-name-keyed input into
     // the env-keyed map the tool-job pod runs: a tool declaring arg `message`
     // mapped to env `MESSAGE`, called with `{"message":"hi"}`, enqueues
@@ -1236,7 +1280,7 @@ mod tests {
 
             let capture = spawn_pod(&dispatch, tool, job_id, vec![done_terminal()]);
             router
-                .dispatch_client_tool(tool, "{}", "")
+                .dispatch_client_tool(tool, "{}", Sender::person(""))
                 .await
                 .unwrap_or_else(|e| panic!("client-direct call to {tool} completes: {e:?}"));
             claimed(&capture).await;
@@ -1484,7 +1528,7 @@ mod tests {
         );
 
         let call_id = router
-            .dispatch_client_tool("Bash", "{}", "")
+            .dispatch_client_tool("Bash", "{}", Sender::person(""))
             .await
             .expect("dispatch mints the call and spawns its stream consumer");
         let mut stream = router
@@ -1536,7 +1580,7 @@ mod tests {
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
 
         let call_id = router
-            .dispatch_client_tool("Bash", "{}", "")
+            .dispatch_client_tool("Bash", "{}", Sender::person(""))
             .await
             .expect("dispatch mints the call");
         let mut stream = router
@@ -1781,7 +1825,7 @@ mod tests {
         let router = classify_router();
 
         let call_id = router
-            .dispatch_client_tool("ListInstructions", "{}", "")
+            .dispatch_client_tool("ListInstructions", "{}", Sender::person(""))
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1803,7 +1847,11 @@ mod tests {
         let router = empty_router();
 
         let call_id = router
-            .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#, "")
+            .dispatch_client_tool(
+                "ReadInstructions",
+                r#"{"path":"missing.md"}"#,
+                Sender::person(""),
+            )
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1860,7 +1908,7 @@ mod tests {
         let router = classify_router();
 
         let call_id = router
-            .dispatch_client_tool("ListInstructions", "{}", "")
+            .dispatch_client_tool("ListInstructions", "{}", Sender::person(""))
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -1880,7 +1928,7 @@ mod tests {
         let router: ToolRouter = empty_router().with_dispatch(dispatch.clone());
 
         let err = router
-            .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "")
+            .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, Sender::person(""))
             .await
             .expect_err("a ChannelStream-source tool is not client-dispatchable");
         assert!(
@@ -2303,7 +2351,7 @@ mod tests {
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
         router
-            .dispatch_client_tool("Bash", "{}", "")
+            .dispatch_client_tool("Bash", "{}", Sender::person(""))
             .await
             .expect("the client's toolset call is dispatched");
         claimed(&capture).await;
@@ -2565,7 +2613,7 @@ mod tests {
     /// A person's call of `name`: its assembled result.
     async fn client_call(router: &ToolRouter, name: &str, input: &str) -> CallToolResponse {
         let call_id = router
-            .dispatch_client_tool(name, input, "")
+            .dispatch_client_tool(name, input, Sender::person(""))
             .await
             .unwrap_or_else(|e| panic!("a person can call {name}, got {e}"));
         drain_client_call(router, &call_id).await.0
@@ -2758,5 +2806,27 @@ mod tests {
         let resp = client_call(&router, START, r#"{"sub_agent":"sub","mandate":"m"}"#).await;
         assert!(resp.is_error, "want an error frame, got {}", text_of(&resp));
         assert!(h.jobs.lock().unwrap().is_empty(), "no Job is created");
+    }
+
+    // A sub-agent the agent starts while the user stops the turn still
+    // starts, then is stopped once its attach opens, and the call ends
+    // Cancelled.
+    #[tokio::test]
+    async fn a_sub_agent_started_as_the_turn_is_stopped_is_stopped_and_the_call_cancelled() {
+        use crate::dispatch_hub::test_support::{serve, sub_agent_link};
+        let link = sub_agent_link();
+        let cancel = CancellationToken::new();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(cancel.clone())]);
+        let (h, router) = start_router(serve(link.clone()), relay);
+
+        let input = r#"{"sub_agent":"sub","mandate":"m"}"#;
+        let outcome = router.call_tool(START, input, false, "tc", &cancel).await;
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "got {outcome:?}"
+        );
+        assert_eq!(h.jobs.lock().unwrap().len(), 1, "the sub-agent was started");
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), link.stopped());
+        stopped.await.expect("the started sub-agent is stopped");
     }
 }

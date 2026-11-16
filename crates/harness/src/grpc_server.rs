@@ -143,6 +143,7 @@ fn history_entry(e: EntrySnapshot) -> HistoryEntry {
         message: Some(e.message),
         sender: e.sender,
         kind: e.kind.into(),
+        outcome: e.outcome.unwrap_or_default() as i32,
     }
 }
 
@@ -181,9 +182,10 @@ impl HarnessControl for HarnessService {
         request: Request<CallToolRequest>,
     ) -> Result<Response<DispatchToolResponse>, Status> {
         let req = request.into_inner();
+        let sender = Sender::named_person(req.sender, req.sender_name);
         let call_id = self
             .router
-            .dispatch_client_tool(&req.name, &req.input_json, &req.sender)
+            .dispatch_client_tool(&req.name, &req.input_json, sender)
             .await
             .map_err(|e| Status::internal(format!("dispatch_tool: {e}")))?;
         Ok(Response::new(DispatchToolResponse { call_id }))
@@ -243,7 +245,8 @@ impl HarnessControl for HarnessService {
         &self,
         request: Request<ClearContextRequest>,
     ) -> Result<Response<ClearContextResponse>, Status> {
-        let sender = Sender::person(request.into_inner().sender);
+        let req = request.into_inner();
+        let sender = Sender::named_person(req.sender, req.sender_name);
         let _slot = self.agent_state.acquire_turn_slot().await;
         self.agent_state
             .log()
@@ -260,7 +263,8 @@ impl HarnessControl for HarnessService {
         &self,
         request: Request<CompactContextRequest>,
     ) -> Result<Response<CompactContextResponse>, Status> {
-        let sender = Sender::person(request.into_inner().sender);
+        let req = request.into_inner();
+        let sender = Sender::named_person(req.sender, req.sender_name);
         let _slot = self.agent_state.acquire_turn_slot().await;
         let log = self.agent_state.log();
         let window = log.read().await.history_for_provider();
@@ -329,7 +333,11 @@ impl HarnessControl for HarnessService {
     ) -> Result<Response<MessageSubAgentResponse>, Status> {
         let req = request.into_inner();
         self.hub()?
-            .message(&req.path, Sender::person(req.sender), &req.text)
+            .message(
+                &req.path,
+                Sender::named_person(req.sender, req.sender_name),
+                &req.text,
+            )
             .await
             .map_err(Status::failed_precondition)?;
         Ok(Response::new(MessageSubAgentResponse {}))
@@ -799,6 +807,58 @@ mod context_tests {
         }
     }
 
+    // History sends each call's saved outcome: none for a result saved before
+    // outcomes existed, failed for a call closed by a restart.
+    #[tokio::test]
+    async fn history_sends_each_tool_results_saved_outcome() {
+        use proto_common::{Message, ToolCall, ToolOutcome};
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "Shell".into(),
+            input_json: "{}".into(),
+        };
+        let calls = |ids: &[&str]| Message {
+            role: "assistant".into(),
+            tool_calls: ids.iter().map(|id| call(id)).collect(),
+            ..Default::default()
+        };
+        let line = |m: &Message| {
+            let mut v = serde_json::to_value(m).unwrap();
+            v["ts"] = "t".into();
+            format!("{v}\n")
+        };
+        let old_result = Message {
+            role: "tool".into(),
+            content: proto_common::text_content("boom"),
+            tool_call_id: Some("old".into()),
+            is_error: Some(true),
+            ..Default::default()
+        };
+        let current =
+            record("user", "go") + &line(&calls(&["old", "restarted"])) + &line(&old_result);
+        let (svc, _root, _, _) = service_with(&current, ScriptedTurns::new(vec![])).await;
+
+        let outcomes: Vec<(String, i32)> = svc
+            .get_conversation_history(Request::new(GetConversationHistoryRequest::default()))
+            .await
+            .expect("history returns Ok")
+            .into_inner()
+            .entries
+            .into_iter()
+            .filter_map(|e| {
+                let m = e.message.unwrap_or_default();
+                (m.role == "tool").then(|| (m.tool_call_id.unwrap_or_default(), e.outcome))
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("old".to_string(), 0),
+                ("restarted".to_string(), ToolOutcome::Failed as i32),
+            ]
+        );
+    }
+
     // A clear or compact sent while a turn holds the turn slot waits for the
     // turn to end: no error, no summary call and no change to the log until
     // then, and once the turn ends the clear leaves one clear entry from the
@@ -817,6 +877,7 @@ mod context_tests {
         let compact = svc.compact_context(Request::new(CompactContextRequest {
             agent: TEST_AG.into(),
             sender: ALICE.into(),
+            sender_name: String::new(),
         }));
         assert!(
             tokio::time::timeout(still_waiting, compact).await.is_err(),
@@ -827,6 +888,7 @@ mod context_tests {
         let clear = svc.clear_context(Request::new(ClearContextRequest {
             agent: TEST_AG.into(),
             sender: ALICE.into(),
+            sender_name: String::new(),
         }));
         tokio::pin!(clear);
         assert!(
@@ -873,6 +935,7 @@ mod context_tests {
         svc.compact_context(Request::new(CompactContextRequest {
             agent: TEST_AG.into(),
             sender: ALICE.into(),
+            sender_name: "Alice Liddell".into(),
         }))
         .await
         .expect("the compact succeeds");
@@ -889,7 +952,7 @@ mod context_tests {
             compacted,
             [(
                 EntryKind::Compact,
-                Some(Sender::person(ALICE)),
+                Some(Sender::named_person(ALICE, "Alice Liddell")),
                 summary.clone()
             )],
             "the compact leaves one compact entry from the person who asked"
@@ -898,10 +961,15 @@ mod context_tests {
         svc.clear_context(Request::new(ClearContextRequest {
             agent: TEST_AG.into(),
             sender: BOB.into(),
+            sender_name: "Bob Builder".into(),
         }))
         .await
         .expect("the clear succeeds");
-        let cleared = [(EntryKind::Clear, Some(Sender::person(BOB)), String::new())];
+        let cleared = [(
+            EntryKind::Clear,
+            Some(Sender::named_person(BOB, "Bob Builder")),
+            String::new(),
+        )];
         assert_eq!(
             history(&svc).await,
             cleared,
@@ -912,6 +980,7 @@ mod context_tests {
             .compact_context(Request::new(CompactContextRequest {
                 agent: TEST_AG.into(),
                 sender: ALICE.into(),
+                sender_name: String::new(),
             }))
             .await
             .expect_err("a compact after the clear is refused");
@@ -1141,12 +1210,16 @@ mod sub_agent_tests {
             path: PATH.into(),
             text: "also tulip".into(),
             sender: ALICE.into(),
+            sender_name: "Alice Liddell".into(),
         }))
         .await
         .expect("message returns Ok");
         assert_eq!(
             landed_from(&inbox).await,
-            [(Sender::person(ALICE), "also tulip".to_string())]
+            [(
+                Sender::named_person(ALICE, "Alice Liddell"),
+                "also tulip".to_string()
+            )]
         );
     }
 
@@ -1174,13 +1247,17 @@ mod sub_agent_tests {
             name: "MessageSubAgent".into(),
             input_json: input("from alice"),
             sender: ALICE.into(),
+            sender_name: "Alice Liddell".into(),
             ..Default::default()
         }))
         .await
         .expect("dispatch returns Ok");
         assert_eq!(
             landed_from(&inbox).await,
-            [(Sender::person(ALICE), "from alice".to_string())],
+            [(
+                Sender::named_person(ALICE, "Alice Liddell"),
+                "from alice".to_string()
+            )],
             "the person's call lands from the person"
         );
 

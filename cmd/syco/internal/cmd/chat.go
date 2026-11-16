@@ -41,6 +41,9 @@ func newChatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if v, _ := cmd.Flags().GetBool("minimal"); v {
+				p.Minimal = true
+			}
 
 			token, err := config.LoadToken(cfgDir, p.Name)
 			if err != nil {
@@ -81,12 +84,12 @@ func newChatCmd() *cobra.Command {
 				out:             out,
 				in:              cmd.InOrStdin(),
 				isTTY:           isTerminal(out),
-				toolCalls:       make(map[string]string),
 			}
 
 			return rs.recvLoop(ctx, cs.client, cs.stream)
 		},
 	}
+	cmd.Flags().Bool("minimal", false, "Hide the mascot images")
 
 	return cmd
 }
@@ -148,7 +151,6 @@ type recvState struct {
 	out       io.Writer
 	isTTY     bool
 	textBuf   strings.Builder
-	toolCalls map[string]string // item_id -> tool name
 
 	// channelStreamID is the open stream, where approval answers go.
 	channelStreamID string
@@ -195,7 +197,7 @@ func (rs *recvState) recvLoop(
 		case fe := <-frameCh:
 			if fe.err != nil {
 				if fe.err != io.EOF {
-					log.Printf("stream error: %v", fe.err)
+					log.Printf("stream error: %s", caretControls(fe.err.Error(), keepInBody))
 				}
 				return errConnectionLost
 			}
@@ -262,7 +264,7 @@ func (rs *recvState) answerApproval(ctx context.Context, client relaypb.RelayGat
 	a := rs.approvals[0]
 	rs.approvals = rs.approvals[1:]
 	if _, err := client.ChannelStreamIngest(ctx, approvalAnswer(rs.channelStreamID, a.requestID, approved)); err != nil {
-		log.Printf("sending approval answer: %v", err)
+		log.Printf("sending approval answer: %s", caretControls(err.Error(), keepInBody))
 	}
 }
 
@@ -270,16 +272,11 @@ func (rs *recvState) renderStreamItem(item *commonpb.StreamItem) {
 	switch phase := item.Phase.(type) {
 	case *commonpb.StreamItem_Start:
 		if tu := phase.Start.GetToolUse(); tu != nil {
-			rs.toolCalls[item.ItemId] = tu.Name
-			rs.printToolLine(fmt.Sprintf("⚙ %s (started)", tu.Name))
+			rs.printToolLine(fmt.Sprintf("⚙ %s (started)", caretControls(tu.Name, "")))
 		}
 	case *commonpb.StreamItem_Delta:
 		if delta := phase.Delta.GetTextDelta(); delta != "" {
 			rs.textBuf.WriteString(delta)
-		}
-	case *commonpb.StreamItem_Stop:
-		if name, ok := rs.toolCalls[item.ItemId]; ok {
-			rs.printToolLine(fmt.Sprintf("⚙ %s (finished)", name))
 		}
 	}
 }
@@ -299,6 +296,7 @@ func flushText(w io.Writer, buf *strings.Builder, isTTY bool) {
 		return
 	}
 	if isTTY {
+		text = caretControls(text, keepInBody)
 		rendered, err := glamour.Render(text, "dark")
 		if err == nil {
 			lipgloss.Fprint(w, rendered)

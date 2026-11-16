@@ -12,24 +12,36 @@ impl Sender {
     pub fn person(subject: impl Into<String>) -> Self {
         Self {
             from: Some(sender::From::Person(subject.into())),
+            display_name: None,
+        }
+    }
+
+    pub fn named_person(subject: impl Into<String>, name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            display_name: (!name.is_empty()).then_some(name),
+            ..Self::person(subject)
         }
     }
 
     pub fn sub_agent(path: impl Into<String>) -> Self {
         Self {
             from: Some(sender::From::SubAgent(path.into())),
+            display_name: None,
         }
     }
 
     pub fn parent_agent(agent: impl Into<String>) -> Self {
         Self {
             from: Some(sender::From::ParentAgent(agent.into())),
+            display_name: None,
         }
     }
 
     pub fn sycophant() -> Self {
         Self {
             from: Some(sender::From::Sycophant(true)),
+            display_name: None,
         }
     }
 }
@@ -123,5 +135,13 @@ mod tests {
             }
             other => panic!("expected FileBlock, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_sender_saved_without_a_display_name_loads_as_the_unnamed_person() {
+        let mut saved = serde_json::to_value(Sender::named_person("alice", "Alice")).unwrap();
+        saved.as_object_mut().unwrap().remove("display_name");
+        let back: Sender = serde_json::from_value(saved).unwrap();
+        assert_eq!(back, Sender::person("alice"));
     }
 }

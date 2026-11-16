@@ -32,7 +32,7 @@ func newWhoamiCmd() *cobra.Command {
 			sub, _ := config.TokenSubject(token)
 			exp, _ := config.TokenExpiry(token)
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Subject: %s\n", sub)
+			fmt.Fprintf(out, "Subject: %s\n", caretControls(sub, ""))
 			fmt.Fprintf(out, "Expires: %s\n", exp.UTC().Format("2006-01-02 15:04:05 UTC"))
 
 			ctx := grpcclient.WithToken(context.Background(), token)
@@ -45,13 +45,13 @@ func newWhoamiCmd() *cobra.Command {
 			client := relaypb.NewRelayGatewayClient(conn)
 			agentsResp, err := client.ListAgents(ctx, &commonpb.ListAgentsRequest{})
 			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not list agents: %v\n", err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not list agents: %s\n", err)
 				return nil
 			}
 
 			fmt.Fprintln(out, "\nAgents:")
 			for _, agent := range agentsResp.Agents {
-				fmt.Fprintf(out, "  %s\n", agent)
+				fmt.Fprintf(out, "  %s\n", caretControls(agent, ""))
 			}
 			return nil
 		},

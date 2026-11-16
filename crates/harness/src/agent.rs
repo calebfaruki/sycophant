@@ -1,4 +1,4 @@
-use proto_common::{content_text, text_block, Message, StopReason};
+use proto_common::{content_text, text_block, Message, StopReason, ToolOutcome};
 use tokio::sync::RwLock;
 use toolset_proto::TurnRequest;
 
@@ -156,11 +156,18 @@ pub(crate) async fn llm_loop(
 
         if !text_only {
             for tc in &result.tool_calls {
-                let (content, is_error) = match tool_router
+                let (content, outcome) = match tool_router
                     .call_tool(&tc.name, &tc.input_json, has_client, &tc.id, &cancel)
                     .await
                 {
-                    Ok(resp) => (resp.content, resp.is_error),
+                    Ok(resp) => {
+                        let outcome = if resp.is_error {
+                            ToolOutcome::Failed
+                        } else {
+                            ToolOutcome::Done
+                        };
+                        (resp.content, outcome)
+                    }
                     // A cancelled tool call is terminal: hard-exit the whole
                     // turn as Cancelled. It must not fold partial output into
                     // an is_error tool result. But the assistant tool_use was
@@ -170,19 +177,27 @@ pub(crate) async fn llm_loop(
                     // keeping the resent history provider-valid (every
                     // tool_use has a paired result).
                     Err(DispatchAbort::Cancelled) => {
-                        if let Err(e) = log
+                        let closed = log
                             .write()
                             .await
-                            .close_open_calls("tool call cancelled")
-                            .await
-                        {
-                            tracing::warn!(error = %e, "skipped persisting cancelled tool result");
+                            .close_open_calls("tool call cancelled", ToolOutcome::Canceled)
+                            .await;
+                        match closed {
+                            Ok(ids) => {
+                                for id in ids {
+                                    sink.emit(emit.tool_stop(id, ToolOutcome::Canceled)).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "skipped persisting cancelled tool result");
+                            }
                         }
                         return Err(LoopError::Cancelled);
                     }
-                    Err(DispatchAbort::Error(e)) => {
-                        (vec![text_block(format!("tool call error: {e}"))], true)
-                    }
+                    Err(DispatchAbort::Error(e)) => (
+                        vec![text_block(format!("tool call error: {e}"))],
+                        ToolOutcome::Failed,
+                    ),
                 };
 
                 let tool_msg = Message {
@@ -190,11 +205,17 @@ pub(crate) async fn llm_loop(
                     content,
                     tool_calls: vec![],
                     tool_call_id: Some(tc.id.clone()),
-                    is_error: if is_error { Some(true) } else { None },
+                    is_error: (outcome == ToolOutcome::Failed).then_some(true),
                 };
-                if let Err(e) = log.write().await.append(tool_msg.clone()).await {
+                if let Err(e) = log
+                    .write()
+                    .await
+                    .append_tool_result(tool_msg.clone(), outcome)
+                    .await
+                {
                     tracing::warn!(error = %e, "skipped persisting tool result");
                 }
+                sink.emit(emit.tool_stop(tc.id.clone(), outcome)).await;
                 request.messages.push(tool_msg);
             }
         }
@@ -243,7 +264,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use proto_common::{content_block, CallToolResponse, Sender};
+    use proto_common::{content_block, CallToolResponse, Sender, StreamItem, ToolOutcome};
     use toolset_proto::TurnEvent;
 
     use crate::test_doubles::{
@@ -252,6 +273,16 @@ mod tests {
 
     fn fresh_log() -> RwLock<ConversationLog> {
         RwLock::new(crate::test_doubles::throwaway_log())
+    }
+
+    /// The item id and outcome of a stop frame.
+    fn stop_outcome(item: &StreamItem) -> Option<(String, i32)> {
+        match &item.phase {
+            Some(proto_common::stream_item::Phase::Stop(stop)) => {
+                Some((item.item_id.clone(), stop.outcome))
+            }
+            _ => None,
+        }
     }
 
     /// Run `llm_loop` with a throwaway log and a `NullSink`.
@@ -715,6 +746,91 @@ mod tests {
         assert_eq!(text, "tool call error: toolset down");
     }
 
+    // Each call's outcome is streamed on its tool item as the call ends: a
+    // clean result is Done, an is_error result and a router error are Failed.
+    // All three arrive before the next model reply starts streaming.
+    #[tokio::test]
+    async fn each_tool_calls_outcome_is_saved_and_streamed_on_its_item_before_the_next_reply() {
+        let mut tb = ScriptedTurns::new(vec![
+            complete_turn(
+                StopReason::ToolUse,
+                "",
+                &[
+                    ("tc1", "Bash", "{}"),
+                    ("tc2", "Bash", "{}"),
+                    ("tc3", "Bash", "{}"),
+                ],
+            ),
+            [
+                vec![content_delta("done")],
+                complete_turn(StopReason::EndTurn, "done", &[]),
+            ]
+            .concat(),
+        ]);
+        let ok = |is_error| {
+            Ok(CallToolResponse {
+                content: vec![text_block("out".into())],
+                is_error,
+            })
+        };
+        let router = FakeRouter::empty()
+            .with_response(ok(false))
+            .with_response(ok(true))
+            .with_response(Err("toolset down".into()));
+        let log = fresh_log();
+        let mut sink = CapturingSink(Vec::new());
+        let result = llm_loop(
+            10,
+            &mut tb,
+            &router,
+            &log,
+            AssistantAttribution::default(),
+            user_request(None),
+            mode(false),
+            &mut sink,
+        )
+        .await;
+        assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
+
+        assert_eq!(
+            sink.0.iter().filter_map(stop_outcome).collect::<Vec<_>>(),
+            [
+                ("tc1".to_string(), ToolOutcome::Done as i32),
+                ("tc2".to_string(), ToolOutcome::Failed as i32),
+                ("tc3".to_string(), ToolOutcome::Failed as i32),
+            ],
+            "each call gets one stop with its outcome, in call order"
+        );
+        let last_stop = sink.0.iter().rposition(|it| stop_outcome(it).is_some());
+        let reply = sink
+            .0
+            .iter()
+            .position(|it| text_delta_of(it) == Some("done"));
+        assert!(
+            matches!((last_stop, reply), (Some(s), Some(r)) if s < r),
+            "every outcome is sent before the next reply streams, stop at {last_stop:?}, reply at \
+             {reply:?}"
+        );
+        let saved: Vec<_> = log
+            .read()
+            .await
+            .snapshot(None)
+            .entries
+            .into_iter()
+            .filter(|e| e.message.role == "tool")
+            .map(|e| e.outcome)
+            .collect();
+        assert_eq!(
+            saved,
+            [
+                Some(ToolOutcome::Done),
+                Some(ToolOutcome::Failed),
+                Some(ToolOutcome::Failed)
+            ],
+            "each call is saved with the outcome it streamed"
+        );
+    }
+
     /// EndTurn ends the loop after one model call.
     #[tokio::test]
     async fn endturn_returns_text_in_one_turn() {
@@ -867,19 +983,24 @@ mod tests {
         );
     }
 
-    // A tool call cancelled after its assistant `tool_use` was recorded gets a
-    // matching tool result written, so the conversation history stays valid for
-    // the next turn. That result is an error carrying only a cancellation
-    // marker, and it is log-only: output already streamed to the user is not
-    // retracted and nothing new is pushed to the client.
+    // The turn is cancelled during the first of two calls, after their assistant
+    // `tool_use` was recorded. Each call, the cancelled one and the one that never
+    // ran, gets a matching tool result written, so the conversation history stays
+    // valid for the next turn. Each result is an error carrying only a
+    // cancellation marker. Output already streamed to the user is not retracted,
+    // and the only new frames are each call's Canceled stop.
     //
-    // The result's `tool_call_id` is what pairs it to the dangling `tool_use`.
+    // Each result's `tool_call_id` is what pairs it to its dangling `tool_use`.
     #[tokio::test]
-    async fn cancelled_tool_call_logs_a_cancelled_error_and_streams_nothing_more() {
+    async fn cancelled_tool_calls_log_cancelled_errors_and_stream_only_their_stops() {
         let mut sink = CapturingSink(Vec::new());
         let mut tb = ScriptedTurns::new(vec![[
             vec![content_delta("live-output-text")],
-            complete_turn(StopReason::ToolUse, "", &[("tc1", "Bash", "{}")]),
+            complete_turn(
+                StopReason::ToolUse,
+                "",
+                &[("tc1", "Bash", "{}"), ("tc2", "Bash", "{}")],
+            ),
         ]
         .concat()]);
         let router = CancellingRouter;
@@ -898,6 +1019,24 @@ mod tests {
         assert!(
             matches!(result, Err(LoopError::Cancelled)),
             "a cancelled tool call is terminal, got {result:?}"
+        );
+
+        let saved: Vec<_> = log
+            .read()
+            .await
+            .snapshot(None)
+            .entries
+            .into_iter()
+            .filter(|e| e.message.role == "tool")
+            .map(|e| (e.message.tool_call_id, e.outcome))
+            .collect();
+        assert_eq!(
+            saved,
+            [
+                (Some("tc1".to_string()), Some(ToolOutcome::Canceled)),
+                (Some("tc2".to_string()), Some(ToolOutcome::Canceled)),
+            ],
+            "each open call is saved as stopped"
         );
 
         let history = log.read().await.history_for_provider();
@@ -953,11 +1092,14 @@ mod tests {
             streamed_live,
             "output streamed before the cancel must remain in the client stream — never retracted"
         );
+        let after: Vec<_> = sink.0.iter().skip(2).map(stop_outcome).collect();
         assert_eq!(
-            sink.0.len(),
-            2,
-            "the cancel is log-only: only the pre-cancel Start+Delta were emitted, got {}",
-            sink.0.len()
+            after,
+            [
+                Some(("tc1".to_string(), ToolOutcome::Canceled as i32)),
+                Some(("tc2".to_string(), ToolOutcome::Canceled as i32)),
+            ],
+            "after the pre-cancel Start+Delta, only each call's Canceled stop is emitted, in call order"
         );
         assert!(
             !sink

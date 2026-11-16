@@ -123,7 +123,7 @@ impl MessageSource for SubscribeMessageSource {
                     return Ok(InboundMessage {
                         content: msg.content,
                         reply_channel_stream: msg.reply_channel_stream,
-                        sender: Sender::person(msg.sender),
+                        sender: Sender::named_person(msg.sender, msg.sender_name),
                         message_id: msg.message_id,
                     });
                 }
@@ -198,6 +198,7 @@ mod tests {
             }],
             reply_channel_stream: None,
             message_id: "test-mid".into(),
+            sender_name: String::new(),
         }
     }
 
@@ -212,6 +213,21 @@ mod tests {
         assert_eq!(msg.message_id, "test-mid");
         assert_eq!(msg.sender, Sender::person("u"));
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn subscribe_message_source_names_the_person_only_when_the_relay_sent_a_name() {
+        let named = UserMessage {
+            sender_name: "Alice Liddell".into(),
+            ..user_message("named")
+        };
+        let driver = MockDriver::new(vec![Ok(())], vec![Ok(named), Ok(user_message("plain"))]);
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut src = SubscribeMessageSource::with_driver(Box::new(driver), flag).no_backoff();
+        let named = src.next_message().await.unwrap().sender;
+        assert_eq!(named, Sender::named_person("u", "Alice Liddell"));
+        let plain = src.next_message().await.unwrap().sender;
+        assert_eq!(plain, Sender::person("u"));
     }
 
     #[tokio::test]
@@ -253,6 +269,7 @@ mod tests {
                 content: vec![],
                 reply_channel_stream: None,
                 message_id: String::new(),
+                sender_name: String::new(),
             })],
         );
         let flag = Arc::new(AtomicBool::new(false));

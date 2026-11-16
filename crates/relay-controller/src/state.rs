@@ -719,6 +719,7 @@ mod tests {
                     sender: "only-alpha".into(),
                     reply_channel_stream: None,
                     message_id: String::new(),
+                    sender_name: String::new(),
                 },
             )
             .await;
@@ -741,6 +742,7 @@ mod tests {
                     sender: "x".into(),
                     reply_channel_stream: None,
                     message_id: String::new(),
+                    sender_name: String::new(),
                 },
             )
             .await;

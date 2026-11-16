@@ -23,7 +23,9 @@ HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' |
   cut -c1-10)"
 # Offline there is no cluster, so a listed agent never exists: the user
 # chart must refuse it. The positive shape is rendered with no agents.
-USER_COMMAND="$(printf '{"user":"%s","handle.slack":"U12345"}' "$SUBJECT")"
+USER_COMMAND="$(printf \
+  '{"user":"%s","handle.slack":"U12345","display-name":"Alice Liddell"}' \
+  "$SUBJECT")"
 USER_MISSING_AG="$(printf \
   '{"user":"%s","agents":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
 # editorconfig-checker-disable-next-line
@@ -985,11 +987,12 @@ def identity_cm(docs):
         return (
             "the identity ConfigMap must carry the sycophant labels, "
             f"got {labels}")
-    want = {"subject": subject, "handle.slack": "U12345"}
+    want = {"subject": subject, "handle.slack": "U12345",
+            "display-name": "Alice Liddell"}
     return (None if cm.get("data") == want
             else "the identity ConfigMap must carry the command data "
             f"verbatim, want {want}, got {cm.get('data')}")
-check("the identity ConfigMap carries the subject and the handle verbatim",
+check("the identity ConfigMap carries the command data verbatim",
       "user", identity_cm)
 
 def membership_binding(docs):

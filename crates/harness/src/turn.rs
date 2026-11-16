@@ -4,7 +4,7 @@ use proto_common::{
     item_delta, item_start, stream_item, ItemDelta, ItemStart, ItemStop, StreamItem, TextItem,
     ToolUseItem,
 };
-use proto_common::{ContentBlock, StopReason, ToolCall};
+use proto_common::{ContentBlock, StopReason, ToolCall, ToolOutcome};
 use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
@@ -70,6 +70,15 @@ impl EmitState {
             phase: Some(phase),
         }
     }
+
+    pub(crate) fn tool_stop(&mut self, item_id: String, outcome: ToolOutcome) -> StreamItem {
+        self.next_frame(
+            item_id,
+            stream_item::Phase::Stop(ItemStop {
+                outcome: outcome as i32,
+            }),
+        )
+    }
 }
 
 /// Map one model turn-event to the streamed-item frames it produces. Pure
@@ -110,7 +119,7 @@ fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<StreamItem>
         Some(turn_event::Event::ToolUseStart(t)) => {
             let mut frames = Vec::new();
             if let Some(id) = state.text_item.take() {
-                frames.push(state.next_frame(id, stream_item::Phase::Stop(ItemStop {})));
+                frames.push(state.next_frame(id, stream_item::Phase::Stop(ItemStop::default())));
             }
             state.tool_item = Some(t.id.clone());
             frames.push(state.next_frame(

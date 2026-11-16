@@ -353,6 +353,7 @@ mod tests {
                     sender: "u".into(),
                     reply_channel_stream: Some("chan".into()),
                     message_id: String::new(),
+                    sender_name: String::new(),
                 },
             )
             .await;

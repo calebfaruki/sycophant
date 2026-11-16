@@ -216,13 +216,18 @@ impl DispatchHub {
 
     /// Carry the sub-agent's requests to the agent's relay until its final
     /// answer or failure comes. Queue it under `path`, then say it is taken.
+    /// A stop asked for before the attach opened is sent once it opens.
     /// An attach that closes first sends stopped if the sub-agent was
     /// stopped, and otherwise finished with why it closed.
     async fn serve(&self, path: &str, (tx, mut frames): Attached) {
-        self.attached
-            .lock()
-            .unwrap()
-            .insert(path.to_string(), tx.clone());
+        let stop_now = {
+            let mut attached = self.attached.lock().unwrap();
+            attached.insert(path.to_string(), tx.clone());
+            self.stopped.lock().unwrap().contains(path)
+        };
+        if stop_now {
+            let _ = self.send(path, parent_frame::Frame::Stop(true)).await;
+        }
         let closed = loop {
             let frame = match frames.message().await {
                 Ok(Some(frame)) => frame,
@@ -356,12 +361,35 @@ impl DispatchHub {
 
     /// Stop the sub-agent at `path` over its attach.
     pub(crate) async fn stop(&self, path: &str) -> Result<(), String> {
-        self.stopped.lock().unwrap().insert(path.to_string());
-        let sent = self.send(path, parent_frame::Frame::Stop(true)).await;
-        if sent.is_err() {
-            self.stopped.lock().unwrap().remove(path);
+        let gone = || format!("no live sub-agent at {path}");
+        let (tx, fresh) = {
+            let attached = self.attached.lock().unwrap();
+            let tx = attached.get(path).cloned().ok_or_else(gone)?;
+            (tx, self.stopped.lock().unwrap().insert(path.to_string()))
+        };
+        let frame = ParentFrame {
+            frame: Some(parent_frame::Frame::Stop(true)),
+        };
+        if tx.send(frame).await.is_err() {
+            if fresh {
+                self.stopped.lock().unwrap().remove(path);
+            }
+            return Err(gone());
         }
-        sent
+        Ok(())
+    }
+
+    /// Stop the sub-agent at `path` now if its attach is open, else as soon
+    /// as it opens.
+    pub(crate) async fn stop_once_attached(&self, path: &str) {
+        {
+            let attached = self.attached.lock().unwrap();
+            if !attached.contains_key(path) {
+                self.stopped.lock().unwrap().insert(path.to_string());
+                return;
+            }
+        }
+        let _ = self.stop(path).await;
     }
 
     async fn send(&self, path: &str, frame: parent_frame::Frame) -> Result<(), String> {
@@ -1141,5 +1169,23 @@ mod tests {
             ),
             "the close is reported as finished with a failure, not stopped, got {got:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_stop_keeps_a_stop_asked_for_before_the_attach_opened() {
+        let link = sub_agent_link();
+        let uris = endpoints(vec![(PATH, serve(link.clone()))], silent_endpoint());
+        let h = test_hub(uris, ScriptedRelay::default(), vec![]);
+
+        h.hub.stop_once_attached(PATH).await;
+        assert!(
+            h.hub.stop(PATH).await.is_err(),
+            "a stop before the attach opens fails"
+        );
+        h.hub.attach(PATH.into());
+
+        timeout(Duration::from_secs(5), link.stopped())
+            .await
+            .expect("the sub-agent is stopped once its attach opens");
     }
 }

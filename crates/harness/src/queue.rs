@@ -122,4 +122,26 @@ mod tests {
             "bob's message is still queued"
         );
     }
+
+    #[tokio::test]
+    async fn take_back_matches_the_senders_subject_and_never_its_display_name() {
+        let queue = MessageQueue::default();
+        queue
+            .push(InboundMessage {
+                sender: Sender::named_person(ALICE, BOB),
+                ..item(ALICE, "A1")
+            })
+            .await;
+
+        assert_eq!(
+            taken(queue.take_back(BOB).await),
+            None,
+            "a display name equal to bob's subject does not make the message bob's"
+        );
+        assert_eq!(
+            taken(queue.take_back(ALICE).await).as_deref(),
+            Some("A1"),
+            "alice takes back her own named message by her subject"
+        );
+    }
 }

@@ -213,8 +213,20 @@ fn identity_cms(rows: &[IdentityRow]) -> Vec<ConfigMap> {
 /// Parse `rows` and swap them in as the live identity table, as the watcher
 /// does on each delivery.
 pub(crate) async fn load_identities(state: &GatewayState, rows: &[IdentityRow<'_>]) {
-    let cms = identity_cms(rows);
-    let (table, errors) = relay_controller::identity::apply_delivery(&cms);
+    load_cms(state, &identity_cms(rows)).await;
+}
+
+pub(crate) async fn load_named_identity(state: &GatewayState, row: IdentityRow<'_>, name: &str) {
+    let mut cms = identity_cms(&[row]);
+    cms[0]
+        .data
+        .get_or_insert_with(Default::default)
+        .insert("display-name".to_string(), name.to_string());
+    load_cms(state, &cms).await;
+}
+
+async fn load_cms(state: &GatewayState, cms: &[ConfigMap]) {
+    let (table, errors) = relay_controller::identity::apply_delivery(cms);
     assert!(
         errors.is_empty(),
         "fixture identities must parse: {errors:?}"

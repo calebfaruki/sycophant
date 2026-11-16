@@ -60,6 +60,7 @@ instructions:
 user:
   tenant: acme
   subject: "https://dex.example.com/dex#alice"
+  displayName: "Alice Liddell"
 
 channel:
   name: app

@@ -77,6 +77,16 @@ func TestApprovalPromptStartsWithTheSubAgentPathBeforeTheTool(t *testing.T) {
 	}
 }
 
+func TestApprovalPromptShowsControlCharactersInTheInputAsCarets(t *testing.T) {
+	a, _ := toolApprovalOf(&commonpb.ServerRequest{
+		RequestId:  "req-esc",
+		ParamsJson: `{"tool":"Bash","input":"ls\u001b[2J"}`,
+	})
+	if p := a.prompt(); !strings.Contains(p, "ls^[[2J") || strings.Contains(p, "\x1b") {
+		t.Fatalf("prompt %q does not show the input's escape as ^[", p)
+	}
+}
+
 // --- One-shot ---
 
 func TestOneShotUserMessageAdvertisesOnlyRequestToolApproval(t *testing.T) {

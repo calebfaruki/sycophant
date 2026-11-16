@@ -85,6 +85,23 @@ type fakeGateway struct {
 	// subAgentCh carries each ListSubAgents, ReadSubAgentLog,
 	// MessageSubAgent and StopSubAgent request.
 	subAgentCh chan any
+
+	agentsReply *commonpb.ListAgentsResponse
+}
+
+func (f *fakeGateway) ListAgents(context.Context, *commonpb.ListAgentsRequest) (*commonpb.ListAgentsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.agentsReply == nil {
+		return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
+	}
+	return f.agentsReply, nil
+}
+
+func (f *fakeGateway) setAgentsReply(r *commonpb.ListAgentsResponse) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agentsReply = r
 }
 
 // agentsNamed is a copy of the agent each ChannelStreamReceive and each
@@ -652,7 +669,7 @@ func streamTextFrames(messageID, itemID, text string) []*commonpb.ChannelStreamO
 				Kind: &commonpb.ItemDelta_TextDelta{TextDelta: text},
 			}}
 		}),
-		itemStopFrame(messageID, itemID),
+		itemStopFrame(messageID, itemID, commonpb.ToolOutcome_TOOL_OUTCOME_UNSPECIFIED),
 	}
 }
 
@@ -662,9 +679,11 @@ func streamItemFrame(messageID, itemID string, phase func(*commonpb.StreamItem))
 	return &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_StreamItem{StreamItem: si}}
 }
 
-func itemStopFrame(messageID, itemID string) *commonpb.ChannelStreamOutbound {
+// itemStopFrame is an item's stop. A tool item's stop carries how the call
+// went once it ran, and none when the model has only finished writing it.
+func itemStopFrame(messageID, itemID string, outcome commonpb.ToolOutcome) *commonpb.ChannelStreamOutbound {
 	return streamItemFrame(messageID, itemID, func(si *commonpb.StreamItem) {
-		si.Phase = &commonpb.StreamItem_Stop{Stop: &commonpb.ItemStop{}}
+		si.Phase = &commonpb.StreamItem_Stop{Stop: &commonpb.ItemStop{Outcome: outcome}}
 	})
 }
 
@@ -684,10 +703,35 @@ func toolInputFrame(messageID, itemID, partial string) *commonpb.ChannelStreamOu
 	})
 }
 
+const (
+	outcomeNone     = commonpb.ToolOutcome_TOOL_OUTCOME_UNSPECIFIED
+	outcomeDone     = commonpb.ToolOutcome_TOOL_OUTCOME_DONE
+	outcomeFailed   = commonpb.ToolOutcome_TOOL_OUTCOME_FAILED
+	outcomeCanceled = commonpb.ToolOutcome_TOOL_OUTCOME_CANCELED
+)
+
+// writeToolCall streams call itemID of tool name with input, then the stop
+// that says the model has written it.
+func writeToolCall(s *fakeStream, msgID, itemID, name, input string) {
+	s.push(toolStartFrame(msgID, itemID, name))
+	s.push(toolInputFrame(msgID, itemID, input))
+	s.push(itemStopFrame(msgID, itemID, outcomeNone))
+}
+
 func toolCallEntry(id, name, inputJSON string) *commonpb.HistoryEntry {
 	return &commonpb.HistoryEntry{Message: &commonpb.Message{
 		Role:      "assistant",
 		ToolCalls: []*commonpb.ToolCall{{Id: id, Name: name, InputJson: inputJSON}},
+	}}
+}
+
+// toolResultEntry is the result of call id as saved before outcomes were:
+// no outcome, not an error.
+func toolResultEntry(id string) *commonpb.HistoryEntry {
+	return &commonpb.HistoryEntry{Message: &commonpb.Message{
+		Role:       "tool",
+		Content:    textContent("result"),
+		ToolCallId: &id,
 	}}
 }
 

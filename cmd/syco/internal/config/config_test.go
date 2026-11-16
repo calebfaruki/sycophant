@@ -87,6 +87,35 @@ server = "relay.dev:9090"
 	}
 }
 
+func TestLoadProfileTurnsMinimalOnForEveryProfileWhenTheDefaultSectionSetsIt(t *testing.T) {
+	t.Setenv("SYCO_PROFILE", "")
+	t.Setenv("SYCO_SERVER", "")
+	t.Setenv("SYCO_AGENT", "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(`[default]
+profile = "dev"
+minimal = true
+
+[profile.dev]
+server = "a:1"
+
+[profile.prod]
+server = "c:3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"", "prod"} {
+		p, err := config.LoadProfile(dir, name)
+		if err != nil {
+			t.Fatalf("loading profile %q: %v", name, err)
+		}
+		if !p.Minimal {
+			t.Fatalf("profile %q loaded with Minimal off under [default] minimal = true", p.Name)
+		}
+	}
+}
+
 func TestListProfiles_ReturnsAllNames(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")

@@ -1,5 +1,5 @@
-# The user command's data contract: subject, agent list, handle bindings.
-# The valid case is admitted; the three shape cases are denied with messages
+# The user command's data contract: subject, agent list, display name, handle
+# bindings. The valid case is admitted; the shape cases are denied with messages
 # naming the offending field.
 apiVersion: v1
 kind: ConfigMap
@@ -16,6 +16,7 @@ data:
   agents: "alpha,beta"
   handle.slack: "U0123ABCDEF"
   handle.telegram: "7133824091"
+  display-name: "Alice Liddell"
 ---
 # An agents entry that is not a DNS-safe name.
 apiVersion: v1
@@ -63,3 +64,67 @@ data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
   agents: "alpha,beta"
   handle.email: "a\rb@example.com"
+---
+# A display name carrying a terminal escape.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-user-4d5e6f7a85
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  agents: "alpha,beta"
+  display-name: "Alice\e[2J"
+---
+# A display name carrying a bidi override.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-user-4d5e6f7a86
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  agents: "alpha,beta"
+  display-name: "Alice\u202Eecil"
+---
+# A display name carrying a line separator.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-user-4d5e6f7a87
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  agents: "alpha,beta"
+  display-name: "Alice\u2028Liddell"
+---
+# An empty display name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-user-4d5e6f7a88
+  annotations:
+    sycophant.md/target: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice"
+  agents: "alpha,beta"
+  display-name: ""

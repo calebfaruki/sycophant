@@ -134,8 +134,9 @@ check("toolset values flatten to command data",
       f"got: {summary('toolset-provision')}")
 
 want = ("provision-user-b212e3ad41", "tenant-acme",
-        {"user": "https://dex.example.com/dex#alice"})
-check("user command named by the subject's sha256 handle",
+        {"user": "https://dex.example.com/dex#alice", "display-name":
+          "Alice Liddell"})
+check("user command named by its subject's sha256 carries the display name",
       summary("user-provision") == want,
       f"got: {summary('user-provision')}")
 
@@ -550,12 +551,20 @@ expect tenant-headscale-bad-storageclass provision-tenant-8f6fc2b2f4 \
   "'headscale.storageClass' must be a Kubernetes name"
 expect tenant-headscale-bad-email provision-tenant-8f6fc2b2f4 \
   "'headscale.acme.email' must be a valid email address"
-# The user command's data contract: subject + agents + handles.
+# The user command's data contract: subject + agents + display name + handles.
 expect user-commands provision-user-4d5e6f7a81 ""
 expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"
 expect user-commands provision-user-4d5e6f7a83 "handle.<channel>"
 expect user-commands provision-user-4d5e6f7a84 \
   "each handle value in a user command must be a non-empty platform user ID"
+expect user-commands provision-user-4d5e6f7a85 \
+  "a user command's 'display-name' must be non-empty"
+expect user-commands provision-user-4d5e6f7a86 \
+  "a user command's 'display-name' must be non-empty"
+expect user-commands provision-user-4d5e6f7a87 \
+  "a user command's 'display-name' must be non-empty"
+expect user-commands provision-user-4d5e6f7a88 \
+  "a user command's 'display-name' must be non-empty"
 # A standing ServiceAccount credential cannot write a user command.
 expect user-from-serviceaccount provision-user-4d5e6f7a81 \
   "admitted only for an issuer-prefixed user identity"

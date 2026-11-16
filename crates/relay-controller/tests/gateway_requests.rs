@@ -15,7 +15,7 @@ use proto_common::{
     channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
     CancelToolRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
     ClearContextRequest, ClientResponse, CompactContextRequest, GetConversationHistoryRequest,
-    GetConversationHistoryResponse, GetTurnStateRequest, ListSubAgentsRequest,
+    GetConversationHistoryResponse, GetTurnStateRequest, ListAgentsRequest, ListSubAgentsRequest,
     ListSubAgentsResponse, MessageSubAgentRequest, ReadSubAgentLogRequest, StopSubAgentRequest,
     TakeBackMessageRequest, ToolComplete, ToolResultFrame, TurnState, TurnStateEvent, UserMessage,
 };
@@ -25,8 +25,8 @@ use relay_proto::relay_gateway_server::RelayGateway;
 
 mod common;
 use common::apiserver::{
-    bearer, bearer_unclassed, first_ack, next_item, state_for, state_with_harness, IdentityRow,
-    K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN,
+    bearer, bearer_unclassed, first_ack, load_identities, load_named_identity, next_item,
+    state_for, state_with_harness, IdentityRow, K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness, MOCK_CALL_ID};
 
@@ -522,6 +522,148 @@ async fn ingest_and_take_back_replace_a_client_sent_sender_with_the_callers_subj
     assert_eq!(forwarded.map(|r| r.sender), Some(ALICE.to_string()));
 }
 
+#[tokio::test]
+async fn the_relay_sends_only_the_callers_current_configured_display_name() {
+    let mock = MockHarness::default();
+    let (seen_clear, seen_compact, seen_message, seen_dispatch) = (
+        mock.seen_clear.clone(),
+        mock.seen_compact.clone(),
+        mock.seen_message_sub_agent.clone(),
+        mock.seen_dispatch.clone(),
+    );
+    let (svc, state) = service_on(mock).await;
+    load_named_identity(&state, ALICE_ROW, "Alice Liddell").await;
+    let mut harness_bus = state.subscribe_or_create("alpha").await;
+    let id = alice_channel_stream(&state).await;
+    let spoof = || "Mallory".to_string();
+    let ingest = |id: &str| ChannelStreamIngestRequest {
+        channel_stream_id: id.into(),
+        user_message: Some(UserMessage {
+            sender_name: spoof(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    svc.channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&id)))
+        .await
+        .unwrap();
+    let queued = tokio::time::timeout(Duration::from_secs(5), harness_bus.recv())
+        .await
+        .expect("the message must reach the harness bus")
+        .unwrap();
+    assert_eq!(
+        (queued.sender.as_str(), queued.sender_name.as_str()),
+        (ALICE, "Alice Liddell")
+    );
+
+    svc.clear_context(bearer(
+        ALICE_TOKEN,
+        ClearContextRequest {
+            agent: "alpha".into(),
+            sender_name: spoof(),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    svc.compact_context(bearer(
+        ALICE_TOKEN,
+        CompactContextRequest {
+            agent: "alpha".into(),
+            sender_name: spoof(),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    svc.message_sub_agent(bearer(
+        ALICE_TOKEN,
+        MessageSubAgentRequest {
+            agent: "alpha".into(),
+            path: "scout".into(),
+            sender_name: spoof(),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    svc.dispatch_tool(bearer(
+        ALICE_TOKEN,
+        CallToolRequest {
+            name: "Bash".into(),
+            agent: "alpha".into(),
+            sender_name: spoof(),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let want = Some((ALICE.to_string(), "Alice Liddell".to_string()));
+    assert_eq!(
+        seen_clear
+            .lock()
+            .unwrap()
+            .take()
+            .map(|r| (r.sender, r.sender_name)),
+        want,
+        "clear"
+    );
+    assert_eq!(
+        seen_compact
+            .lock()
+            .unwrap()
+            .take()
+            .map(|r| (r.sender, r.sender_name)),
+        want,
+        "compact"
+    );
+    assert_eq!(
+        seen_message
+            .lock()
+            .unwrap()
+            .take()
+            .map(|r| (r.sender, r.sender_name)),
+        want,
+        "message to a sub-agent"
+    );
+    assert_eq!(
+        seen_dispatch
+            .lock()
+            .unwrap()
+            .take()
+            .map(|r| (r.sender, r.sender_name)),
+        want,
+        "tool call"
+    );
+    let listed = svc
+        .list_agents(bearer(ALICE_TOKEN, ListAgentsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.display_name, "Alice Liddell");
+
+    load_identities(&state, &[ALICE_ROW]).await;
+    svc.channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&id)))
+        .await
+        .unwrap();
+    let queued = tokio::time::timeout(Duration::from_secs(5), harness_bus.recv())
+        .await
+        .expect("the message must reach the harness bus")
+        .unwrap();
+    assert_eq!(
+        (queued.sender.as_str(), queued.sender_name.as_str()),
+        (ALICE, ""),
+        "with the name removed the next message carries none, so the subject shows"
+    );
+    let listed = svc
+        .list_agents(bearer(ALICE_TOKEN, ListAgentsRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.display_name, "");
+}
+
 // --- ChannelStreamReceive -----------------------------------------------------------
 
 #[tokio::test]
@@ -574,11 +716,11 @@ async fn get_conversation_history_reaches_the_harness_unchanged_for_any_subject_
     assert_eq!(*seen_history.lock().unwrap(), Some(sent));
 }
 
-/// The relay stamps the sender itself on clear, compact and a message to a
-/// sub-agent: a sender the client writes is replaced by the caller's
-/// subject, and every other field reaches the harness unchanged.
+/// The relay replaces the sender and its name on clear, compact and a message
+/// to a sub-agent with the caller's subject and configured name. Every other
+/// field reaches the harness unchanged.
 #[tokio::test]
-async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender() {
+async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_and_configured_name() {
     let mock = MockHarness::default();
     let (seen_clear, seen_compact, seen_message) = (
         mock.seen_clear.clone(),
@@ -590,6 +732,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
     let clear = ClearContextRequest {
         agent: "alpha".into(),
         sender: BOB.into(),
+        sender_name: "Mallory".into(),
     };
     svc.clear_context(bearer(ALICE_TOKEN, clear.clone()))
         .await
@@ -598,6 +741,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
         *seen_clear.lock().unwrap(),
         Some(ClearContextRequest {
             sender: ALICE.into(),
+            sender_name: String::new(),
             ..clear
         })
     );
@@ -605,6 +749,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
     let compact = CompactContextRequest {
         agent: "alpha".into(),
         sender: BOB.into(),
+        sender_name: "Mallory".into(),
     };
     svc.compact_context(bearer(ALICE_TOKEN, compact.clone()))
         .await
@@ -613,6 +758,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
         *seen_compact.lock().unwrap(),
         Some(CompactContextRequest {
             sender: ALICE.into(),
+            sender_name: String::new(),
             ..compact
         })
     );
@@ -622,6 +768,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
         path: "scout".into(),
         text: "look again".into(),
         sender: BOB.into(),
+        sender_name: "Mallory".into(),
     };
     svc.message_sub_agent(bearer(ALICE_TOKEN, message.clone()))
         .await
@@ -630,6 +777,7 @@ async fn clear_compact_and_sub_agent_message_carry_the_callers_subject_as_sender
         *seen_message.lock().unwrap(),
         Some(MessageSubAgentRequest {
             sender: ALICE.into(),
+            sender_name: String::new(),
             ..message
         })
     );
@@ -690,9 +838,9 @@ async fn list_read_log_and_stop_sub_agent_reach_the_harness_unchanged_and_return
 
 // --- Tool forwarding ----------------------------------------------------------
 
-/// On a tool call the relay replaces the sender with the caller's subject,
-/// every other field reaches the harness unchanged, and the harness's
-/// call_id comes back unaltered.
+/// On a tool call the relay replaces the sender and its name with the
+/// caller's subject and configured name. Every other field reaches the
+/// harness unchanged, and the harness's call_id comes back unaltered.
 #[tokio::test]
 async fn dispatch_tool_stamps_the_callers_sender_and_returns_harness_call_id() {
     let seen_dispatch: Arc<Mutex<Option<CallToolRequest>>> = Arc::default();
@@ -706,6 +854,7 @@ async fn dispatch_tool_stamps_the_callers_sender_and_returns_harness_call_id() {
         input_json: r#"{"cmd":"ls"}"#.into(),
         agent: "alpha".into(),
         sender: BOB.into(),
+        sender_name: "Mallory".into(),
     };
     let resp = svc
         .dispatch_tool(bearer(ALICE_TOKEN, sent.clone()))
@@ -716,6 +865,7 @@ async fn dispatch_tool_stamps_the_callers_sender_and_returns_harness_call_id() {
         *seen_dispatch.lock().unwrap(),
         Some(CallToolRequest {
             sender: ALICE.into(),
+            sender_name: String::new(),
             ..sent
         })
     );

@@ -769,6 +769,7 @@ type Sender struct {
 	//	*Sender_ParentAgent
 	//	*Sender_Sycophant
 	From          isSender_From `protobuf_oneof:"from"`
+	DisplayName   *string       `protobuf:"bytes,5,opt,name=display_name,json=displayName,proto3,oneof" json:"display_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -846,6 +847,13 @@ func (x *Sender) GetSycophant() bool {
 	return false
 }
 
+func (x *Sender) GetDisplayName() string {
+	if x != nil && x.DisplayName != nil {
+		return *x.DisplayName
+	}
+	return ""
+}
+
 type isSender_From interface {
 	isSender_From()
 }
@@ -916,6 +924,7 @@ func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
 type ListAgentsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Agents        []string               `protobuf:"bytes,1,rep,name=agents,proto3" json:"agents,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -955,6 +964,13 @@ func (x *ListAgentsResponse) GetAgents() []string {
 		return x.Agents
 	}
 	return nil
+}
+
+func (x *ListAgentsResponse) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
 }
 
 type ChannelStreamAck struct {
@@ -1793,7 +1809,9 @@ func (*ItemDelta_TextDelta) isItemDelta_Kind() {}
 func (*ItemDelta_ToolInputJson) isItemDelta_Kind() {}
 
 type ItemStop struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Set on a tool item's stop, unset on a text stop.
+	Outcome       ToolOutcome `protobuf:"varint,1,opt,name=outcome,proto3,enum=sycophant.common.v1.ToolOutcome" json:"outcome,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1826,6 +1844,13 @@ func (x *ItemStop) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ItemStop.ProtoReflect.Descriptor instead.
 func (*ItemStop) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ItemStop) GetOutcome() ToolOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return ToolOutcome_TOOL_OUTCOME_UNSPECIFIED
 }
 
 type ChannelStreamSend struct {
@@ -1974,6 +1999,7 @@ type UserMessage struct {
 	// Minted fresh by the relay for each ingested user message; never
 	// accepted from a client. The harness echoes it on that turn's frames.
 	MessageId     string `protobuf:"bytes,6,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	SenderName    string `protobuf:"bytes,7,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2032,6 +2058,13 @@ func (x *UserMessage) GetReplyChannelStream() string {
 func (x *UserMessage) GetMessageId() string {
 	if x != nil {
 		return x.MessageId
+	}
+	return ""
+}
+
+func (x *UserMessage) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
 	}
 	return ""
 }
@@ -2162,8 +2195,10 @@ type HistoryEntry struct {
 	// The persisted message — role, content blocks, tool calls, etc.
 	Message *Message `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
 	// Set on a user entry.
-	Sender        *Sender   `protobuf:"bytes,5,opt,name=sender,proto3" json:"sender,omitempty"`
-	Kind          EntryKind `protobuf:"varint,6,opt,name=kind,proto3,enum=sycophant.common.v1.EntryKind" json:"kind,omitempty"`
+	Sender *Sender   `protobuf:"bytes,5,opt,name=sender,proto3" json:"sender,omitempty"`
+	Kind   EntryKind `protobuf:"varint,6,opt,name=kind,proto3,enum=sycophant.common.v1.EntryKind" json:"kind,omitempty"`
+	// Set on a tool result entry, unset on entries saved before this field.
+	Outcome       ToolOutcome `protobuf:"varint,7,opt,name=outcome,proto3,enum=sycophant.common.v1.ToolOutcome" json:"outcome,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2231,6 +2266,13 @@ func (x *HistoryEntry) GetKind() EntryKind {
 		return x.Kind
 	}
 	return EntryKind_ENTRY_KIND_MESSAGE
+}
+
+func (x *HistoryEntry) GetOutcome() ToolOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return ToolOutcome_TOOL_OUTCOME_UNSPECIFIED
 }
 
 type GetTurnStateRequest struct {
@@ -2483,6 +2525,7 @@ type ClearContextRequest struct {
 	// Set only by the relay, to the caller's authenticated subject; any
 	// client-supplied value is ignored.
 	Sender        string `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	SenderName    string `protobuf:"bytes,3,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2531,6 +2574,13 @@ func (x *ClearContextRequest) GetSender() string {
 	return ""
 }
 
+func (x *ClearContextRequest) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
+	}
+	return ""
+}
+
 type ClearContextResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -2575,6 +2625,7 @@ type CompactContextRequest struct {
 	// Set only by the relay, to the caller's authenticated subject; any
 	// client-supplied value is ignored.
 	Sender        string `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	SenderName    string `protobuf:"bytes,3,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2619,6 +2670,13 @@ func (x *CompactContextRequest) GetAgent() string {
 func (x *CompactContextRequest) GetSender() string {
 	if x != nil {
 		return x.Sender
+	}
+	return ""
+}
+
+func (x *CompactContextRequest) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
 	}
 	return ""
 }
@@ -2808,6 +2866,7 @@ type MessageSubAgentRequest struct {
 	// Set only by the relay, to the caller's authenticated subject; any
 	// client-supplied value is ignored.
 	Sender        string `protobuf:"bytes,4,opt,name=sender,proto3" json:"sender,omitempty"`
+	SenderName    string `protobuf:"bytes,5,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2866,6 +2925,13 @@ func (x *MessageSubAgentRequest) GetText() string {
 func (x *MessageSubAgentRequest) GetSender() string {
 	if x != nil {
 		return x.Sender
+	}
+	return ""
+}
+
+func (x *MessageSubAgentRequest) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
 	}
 	return ""
 }
@@ -3163,6 +3229,7 @@ type CallToolRequest struct {
 	// Set only by the relay, to the caller's authenticated subject; any
 	// client-supplied value is ignored.
 	Sender        string `protobuf:"bytes,5,opt,name=sender,proto3" json:"sender,omitempty"`
+	SenderName    string `protobuf:"bytes,6,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3221,6 +3288,13 @@ func (x *CallToolRequest) GetAgent() string {
 func (x *CallToolRequest) GetSender() string {
 	if x != nil {
 		return x.Sender
+	}
+	return ""
+}
+
+func (x *CallToolRequest) GetSenderName() string {
+	if x != nil {
+		return x.SenderName
 	}
 	return ""
 }
@@ -4345,16 +4419,19 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"toolCallId\x88\x01\x01\x12\x1e\n" +
 	"\bis_error\x18\x05 \x01(\bH\x01R\aisError\x88\x01\x01B\x0f\n" +
 	"\r_tool_call_idB\v\n" +
-	"\t_is_error\"\x8e\x01\n" +
+	"\t_is_error\"\xc7\x01\n" +
 	"\x06Sender\x12\x18\n" +
 	"\x06person\x18\x01 \x01(\tH\x00R\x06person\x12\x1d\n" +
 	"\tsub_agent\x18\x02 \x01(\tH\x00R\bsubAgent\x12#\n" +
 	"\fparent_agent\x18\x03 \x01(\tH\x00R\vparentAgent\x12\x1e\n" +
-	"\tsycophant\x18\x04 \x01(\bH\x00R\tsycophantB\x06\n" +
-	"\x04from\"\x13\n" +
-	"\x11ListAgentsRequest\",\n" +
+	"\tsycophant\x18\x04 \x01(\bH\x00R\tsycophant\x12&\n" +
+	"\fdisplay_name\x18\x05 \x01(\tH\x01R\vdisplayName\x88\x01\x01B\x06\n" +
+	"\x04fromB\x0f\n" +
+	"\r_display_name\"\x13\n" +
+	"\x11ListAgentsRequest\"O\n" +
 	"\x12ListAgentsResponse\x12\x16\n" +
-	"\x06agents\x18\x01 \x03(\tR\x06agents\">\n" +
+	"\x06agents\x18\x01 \x03(\tR\x06agents\x12!\n" +
+	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\">\n" +
 	"\x10ChannelStreamAck\x12*\n" +
 	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\"\xf8\x05\n" +
 	"\x15ChannelStreamOutbound\x129\n" +
@@ -4407,9 +4484,9 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\n" +
 	"text_delta\x18\x01 \x01(\tH\x00R\ttextDelta\x12(\n" +
 	"\x0ftool_input_json\x18\x02 \x01(\tH\x00R\rtoolInputJsonB\x06\n" +
-	"\x04kind\"\n" +
-	"\n" +
-	"\bItemStop\"\x9b\x01\n" +
+	"\x04kind\"F\n" +
+	"\bItemStop\x12:\n" +
+	"\aoutcome\x18\x01 \x01(\x0e2 .sycophant.common.v1.ToolOutcomeR\aoutcome\"\x9b\x01\n" +
 	"\x11ChannelStreamSend\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x122\n" +
 	"\x04kind\x18\x03 \x01(\x0e2\x1e.sycophant.common.v1.EntryKindR\x04kindJ\x04\b\x02\x10\x03R\x0fconversation_id\"\xd6\x01\n" +
@@ -4419,13 +4496,15 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x04code\x18\x04 \x01(\tR\x04code\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\a \x01(\tR\tmessageIdJ\x04\b\x02\x10\x03J\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\x0fconversation_idR\n" +
-	"agent_nameR\x14system_prompt_sha256\"\xf6\x01\n" +
+	"agent_nameR\x14system_prompt_sha256\"\x97\x02\n" +
 	"\vUserMessage\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12\x16\n" +
 	"\x06sender\x18\x02 \x01(\tR\x06sender\x125\n" +
 	"\x14reply_channel_stream\x18\x03 \x01(\tH\x00R\x12replyChannelStream\x88\x01\x01\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x06 \x01(\tR\tmessageIdB\x17\n" +
+	"message_id\x18\x06 \x01(\tR\tmessageId\x12\x1f\n" +
+	"\vsender_name\x18\a \x01(\tR\n" +
+	"senderNameB\x17\n" +
 	"\x15_reply_channel_streamJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06R\x0fconversation_idR\x06grants\"~\n" +
 	"\x1dGetConversationHistoryRequest\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x00R\x05limit\x88\x01\x01\x12\x14\n" +
@@ -4434,13 +4513,14 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x1eGetConversationHistoryResponse\x12;\n" +
 	"\aentries\x18\x01 \x03(\v2!.sycophant.common.v1.HistoryEntryR\aentries\x12\x1b\n" +
 	"\ttotal_seq\x18\x02 \x01(\x04R\btotalSeq\x12\x1c\n" +
-	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"\xdc\x01\n" +
+	"\ttruncated\x18\x03 \x01(\bR\ttruncated\"\x98\x02\n" +
 	"\fHistoryEntry\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x0e\n" +
 	"\x02ts\x18\x02 \x01(\tR\x02ts\x126\n" +
 	"\amessage\x18\x03 \x01(\v2\x1c.sycophant.common.v1.MessageR\amessage\x123\n" +
 	"\x06sender\x18\x05 \x01(\v2\x1b.sycophant.common.v1.SenderR\x06sender\x122\n" +
-	"\x04kind\x18\x06 \x01(\x0e2\x1e.sycophant.common.v1.EntryKindR\x04kindJ\x04\b\x04\x10\x05R\x03tag\"B\n" +
+	"\x04kind\x18\x06 \x01(\x0e2\x1e.sycophant.common.v1.EntryKindR\x04kind\x12:\n" +
+	"\aoutcome\x18\a \x01(\x0e2 .sycophant.common.v1.ToolOutcomeR\aoutcomeJ\x04\b\x04\x10\x05R\x03tag\"B\n" +
 	"\x13GetTurnStateRequest\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agentJ\x04\b\x01\x10\x02R\x0fconversation_id\"@\n" +
 	"\x11CancelTurnRequest\x12\x14\n" +
@@ -4452,14 +4532,18 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x06sender\x18\x02 \x01(\tR\x06sender\"l\n" +
 	"\x17TakeBackMessageResponse\x12\x14\n" +
 	"\x05taken\x18\x01 \x01(\bR\x05taken\x12;\n" +
-	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\"C\n" +
+	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\"d\n" +
 	"\x13ClearContextRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x16\n" +
-	"\x06sender\x18\x02 \x01(\tR\x06sender\"\x16\n" +
-	"\x14ClearContextResponse\"E\n" +
+	"\x06sender\x18\x02 \x01(\tR\x06sender\x12\x1f\n" +
+	"\vsender_name\x18\x03 \x01(\tR\n" +
+	"senderName\"\x16\n" +
+	"\x14ClearContextResponse\"f\n" +
 	"\x15CompactContextRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x16\n" +
-	"\x06sender\x18\x02 \x01(\tR\x06sender\"\x18\n" +
+	"\x06sender\x18\x02 \x01(\tR\x06sender\x12\x1f\n" +
+	"\vsender_name\x18\x03 \x01(\tR\n" +
+	"senderName\"\x18\n" +
 	"\x16CompactContextResponse\",\n" +
 	"\x14ListSubAgentsRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\"-\n" +
@@ -4467,12 +4551,14 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x05paths\x18\x01 \x03(\tR\x05paths\"B\n" +
 	"\x16ReadSubAgentLogRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"n\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\"\x8f\x01\n" +
 	"\x16MessageSubAgentRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\x12\x16\n" +
-	"\x06sender\x18\x04 \x01(\tR\x06sender\"\x19\n" +
+	"\x06sender\x18\x04 \x01(\tR\x06sender\x12\x1f\n" +
+	"\vsender_name\x18\x05 \x01(\tR\n" +
+	"senderName\"\x19\n" +
 	"\x17MessageSubAgentResponse\"?\n" +
 	"\x13StopSubAgentRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x12\n" +
@@ -4486,13 +4572,15 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
 	"\x0fparameters_json\x18\x03 \x01(\tR\x0eparametersJson\x12\x18\n" +
-	"\atoolset\x18\x04 \x01(\tR\atoolset\"\x89\x01\n" +
+	"\atoolset\x18\x04 \x01(\tR\atoolset\"\xaa\x01\n" +
 	"\x0fCallToolRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
 	"input_json\x18\x02 \x01(\tR\tinputJson\x12\x14\n" +
 	"\x05agent\x18\x04 \x01(\tR\x05agent\x12\x16\n" +
-	"\x06sender\x18\x05 \x01(\tR\x06senderJ\x04\b\x03\x10\x04R\x0fconversation_id\"j\n" +
+	"\x06sender\x18\x05 \x01(\tR\x06sender\x12\x1f\n" +
+	"\vsender_name\x18\x06 \x01(\tR\n" +
+	"senderNameJ\x04\b\x03\x10\x04R\x0fconversation_id\"j\n" +
 	"\x10CallToolResponse\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12\x19\n" +
 	"\bis_error\x18\x02 \x01(\bR\aisError\"\xc8\x01\n" +
@@ -4695,29 +4783,31 @@ var file_sycophant_common_v1_common_proto_depIdxs = []int32{
 	26, // 17: sycophant.common.v1.StreamItem.stop:type_name -> sycophant.common.v1.ItemStop
 	23, // 18: sycophant.common.v1.ItemStart.text:type_name -> sycophant.common.v1.TextItem
 	24, // 19: sycophant.common.v1.ItemStart.tool_use:type_name -> sycophant.common.v1.ToolUseItem
-	4,  // 20: sycophant.common.v1.ChannelStreamSend.content:type_name -> sycophant.common.v1.ContentBlock
-	0,  // 21: sycophant.common.v1.ChannelStreamSend.kind:type_name -> sycophant.common.v1.EntryKind
-	2,  // 22: sycophant.common.v1.TurnStateEvent.state:type_name -> sycophant.common.v1.TurnState
-	4,  // 23: sycophant.common.v1.UserMessage.content:type_name -> sycophant.common.v1.ContentBlock
-	32, // 24: sycophant.common.v1.GetConversationHistoryResponse.entries:type_name -> sycophant.common.v1.HistoryEntry
-	11, // 25: sycophant.common.v1.HistoryEntry.message:type_name -> sycophant.common.v1.Message
-	12, // 26: sycophant.common.v1.HistoryEntry.sender:type_name -> sycophant.common.v1.Sender
-	0,  // 27: sycophant.common.v1.HistoryEntry.kind:type_name -> sycophant.common.v1.EntryKind
-	4,  // 28: sycophant.common.v1.TakeBackMessageResponse.content:type_name -> sycophant.common.v1.ContentBlock
-	51, // 29: sycophant.common.v1.ToolListUpdate.tools:type_name -> sycophant.common.v1.ToolInfo
-	4,  // 30: sycophant.common.v1.CallToolResponse.content:type_name -> sycophant.common.v1.ContentBlock
-	7,  // 31: sycophant.common.v1.ToolResultFrame.image:type_name -> sycophant.common.v1.ImageBlock
-	55, // 32: sycophant.common.v1.ToolResultFrame.complete:type_name -> sycophant.common.v1.ToolComplete
-	3,  // 33: sycophant.common.v1.ToolComplete.outcome:type_name -> sycophant.common.v1.ToolOutcome
-	29, // 34: sycophant.common.v1.ChannelStreamIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
-	65, // 35: sycophant.common.v1.ChannelStreamIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
-	66, // 36: sycophant.common.v1.ClientResponse.error:type_name -> sycophant.common.v1.ClientResponseError
-	66, // 37: sycophant.common.v1.SendServerRequestAndAwaitResponse.error:type_name -> sycophant.common.v1.ClientResponseError
-	38, // [38:38] is the sub-list for method output_type
-	38, // [38:38] is the sub-list for method input_type
-	38, // [38:38] is the sub-list for extension type_name
-	38, // [38:38] is the sub-list for extension extendee
-	0,  // [0:38] is the sub-list for field type_name
+	3,  // 20: sycophant.common.v1.ItemStop.outcome:type_name -> sycophant.common.v1.ToolOutcome
+	4,  // 21: sycophant.common.v1.ChannelStreamSend.content:type_name -> sycophant.common.v1.ContentBlock
+	0,  // 22: sycophant.common.v1.ChannelStreamSend.kind:type_name -> sycophant.common.v1.EntryKind
+	2,  // 23: sycophant.common.v1.TurnStateEvent.state:type_name -> sycophant.common.v1.TurnState
+	4,  // 24: sycophant.common.v1.UserMessage.content:type_name -> sycophant.common.v1.ContentBlock
+	32, // 25: sycophant.common.v1.GetConversationHistoryResponse.entries:type_name -> sycophant.common.v1.HistoryEntry
+	11, // 26: sycophant.common.v1.HistoryEntry.message:type_name -> sycophant.common.v1.Message
+	12, // 27: sycophant.common.v1.HistoryEntry.sender:type_name -> sycophant.common.v1.Sender
+	0,  // 28: sycophant.common.v1.HistoryEntry.kind:type_name -> sycophant.common.v1.EntryKind
+	3,  // 29: sycophant.common.v1.HistoryEntry.outcome:type_name -> sycophant.common.v1.ToolOutcome
+	4,  // 30: sycophant.common.v1.TakeBackMessageResponse.content:type_name -> sycophant.common.v1.ContentBlock
+	51, // 31: sycophant.common.v1.ToolListUpdate.tools:type_name -> sycophant.common.v1.ToolInfo
+	4,  // 32: sycophant.common.v1.CallToolResponse.content:type_name -> sycophant.common.v1.ContentBlock
+	7,  // 33: sycophant.common.v1.ToolResultFrame.image:type_name -> sycophant.common.v1.ImageBlock
+	55, // 34: sycophant.common.v1.ToolResultFrame.complete:type_name -> sycophant.common.v1.ToolComplete
+	3,  // 35: sycophant.common.v1.ToolComplete.outcome:type_name -> sycophant.common.v1.ToolOutcome
+	29, // 36: sycophant.common.v1.ChannelStreamIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
+	65, // 37: sycophant.common.v1.ChannelStreamIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
+	66, // 38: sycophant.common.v1.ClientResponse.error:type_name -> sycophant.common.v1.ClientResponseError
+	66, // 39: sycophant.common.v1.SendServerRequestAndAwaitResponse.error:type_name -> sycophant.common.v1.ClientResponseError
+	40, // [40:40] is the sub-list for method output_type
+	40, // [40:40] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_sycophant_common_v1_common_proto_init() }

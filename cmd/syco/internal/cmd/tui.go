@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"image/color"
+	"image/png"
+	"os"
 	"strings"
 	"time"
 
@@ -16,7 +20,10 @@ import (
 	glamouransi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/cancelreader"
+	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
 
@@ -29,7 +36,22 @@ import (
 // runTUI launches the interactive Bubble Tea TUI for multi-turn chat on the
 // agent's one conversation.
 func runTUI(cfgDir string, p *config.Profile, token string) error {
-	_, err := tea.NewProgram(newTUIModel(cfgDir, p, token)).Run()
+	m := newTUIModel(cfgDir, p, token)
+	in := int(os.Stdin.Fd())
+	if term.IsTerminal(in) && term.IsTerminal(int(os.Stdout.Fd())) {
+		if old, err := term.MakeRaw(in); err == nil {
+			if cr, err := cancelreader.NewReader(os.Stdin); err == nil {
+				cellW, cellH, ok := probeImages(cr, os.Stdout, 200*time.Millisecond)
+				cr.Cancel()
+				_ = cr.Close()
+				if ok {
+					m.enableImages(cellW, cellH)
+				}
+			}
+			_ = term.Restore(in, old)
+		}
+	}
+	_, err := tea.NewProgram(m).Run()
 	return err
 }
 
@@ -50,21 +72,27 @@ const (
 // --- Styles ---
 
 var (
-	toolStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	accentCyan = lipgloss.Color("#12C8E6")
+	accentPink = lipgloss.Color("#FF2E8F")
+)
+
+var (
+	toolStyle      = lipgloss.NewStyle().Foreground(accentCyan)
 	statusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	pickerTitle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	doneStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	pickerTitle    = lipgloss.NewStyle().Foreground(accentCyan).Bold(true)
 	pickerItem     = lipgloss.NewStyle().PaddingLeft(2)
-	pickerSelected = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("10")).Bold(true)
+	pickerSelected = lipgloss.NewStyle().PaddingLeft(2).Foreground(accentPink).Bold(true)
 	logoStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	selectionStyle = lipgloss.NewStyle().Reverse(true)
 )
 
 var (
 	panelBg           = lipgloss.Color("236")
-	panelAccent       = lipgloss.Color("12")
 	panelApproval     = lipgloss.Color("3")
 	panelDisconnected = lipgloss.Color("1")
-	connectedDot      = lipgloss.Color("10")
+	connectedDot      = lipgloss.Color("2")
 )
 
 const logo = `█▀▀▀ █  █ █▀▀▀ █▀▀█ █▀▀█ █  █ █▀▀█ █▀▀▄ ▀██▀
@@ -81,10 +109,9 @@ func panelRow(bar, r string, width int) string {
 }
 
 var (
-	panelFill       = lipgloss.NewStyle().Background(panelBg)
-	panelDim        = statusStyle.Background(panelBg)
-	panelTool       = toolStyle.Background(panelBg)
-	panelAccentText = lipgloss.NewStyle().Foreground(panelAccent).Background(panelBg)
+	panelFill = lipgloss.NewStyle().Background(panelBg)
+	panelDim  = statusStyle.Background(panelBg)
+	panelTool = toolStyle.Background(panelBg)
 )
 
 const panelPad = 2
@@ -118,8 +145,9 @@ type connectedMsg struct {
 	stream          grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
 	channelStreamID string
 
-	history []*commonpb.HistoryEntry
-	running bool
+	history     []*commonpb.HistoryEntry
+	running     bool
+	displayName string
 }
 
 type connErrMsg struct {
@@ -149,10 +177,11 @@ type contextMsg struct {
 	err     error
 }
 
-// subAgentMsg is the outcome of a sub-agent command: the rows it shows, or
-// err.
+// subAgentMsg is the outcome of a sub-agent command: the rows it shows, the
+// sub-agent chat /log read, or err.
 type subAgentMsg struct {
 	notices []string
+	log     *transcriptPart
 	err     error
 }
 
@@ -167,9 +196,10 @@ type cancelErrMsg struct {
 }
 
 type agentsMsg struct {
-	agents []string
-	conn   *grpc.ClientConn
-	client relaypb.RelayGatewayClient
+	agents      []string
+	displayName string
+	conn        *grpc.ClientConn
+	client      relaypb.RelayGatewayClient
 }
 
 type agentsErrMsg struct {
@@ -213,7 +243,8 @@ type tuiModel struct {
 	started    bool
 
 	// Identity from token.
-	subject string
+	subject     string
+	displayName string
 
 	agents        []string
 	pickerCursor  int
@@ -223,6 +254,10 @@ type tuiModel struct {
 	input        textarea.Model
 	ready        bool
 	userAtBottom bool
+
+	selecting      bool
+	selFrom, selTo cell
+	copyText       func(string) tea.Cmd
 
 	// Sent messages, oldest first, for Up/Down to recall. recallAt is the
 	// one in the input while browsing, len(recall) when not; draft is
@@ -234,6 +269,9 @@ type tuiModel struct {
 
 	width  int
 	height int
+
+	imagesSupported         bool
+	startMascot, chatMascot mascot
 
 	quitting bool
 	err      error
@@ -267,10 +305,35 @@ func newTUIModel(cfgDir string, p *config.Profile, token string) *tuiModel {
 		userAtBottom:  true,
 		retryTick:     time.Second,
 		backoff:       initialBackoff,
+		copyText:      copyToClipboard,
 	}
 	m.recall = config.LoadInputHistory(cfgDir)
 	m.recallAt = len(m.recall)
 	return m
+}
+
+func (m *tuiModel) enableImages(cellW, cellH int) {
+	sprite, err := png.Decode(bytes.NewReader(mascotPNG))
+	if err != nil {
+		return
+	}
+	h := sprite.Bounds().Dy()
+	m.startMascot = newMascot(sprite, startMascotID, 6*h, cellW, cellH, max(cellH/2-6, 0))
+	// The chat mascot stands as tall as the panel around a one-line input.
+	m.chatMascot = newMascot(sprite, chatMascotID, panelChrome*cellH*h/(h-bottomGap(sprite)), cellW, cellH, 0)
+	m.imagesSupported = m.startMascot.rows <= len(diacritics)
+}
+
+func (m *tuiModel) cuteMode() bool {
+	return m.imagesSupported && !m.profile.Minimal
+}
+
+func (m *tuiModel) chatMascotFits() bool {
+	if !m.cuteMode() {
+		return false
+	}
+	pw := m.width - m.chatMascot.cols
+	return ansi.StringWidth(caretControls(m.profile.Agent, "")) <= inputWidth(pw) && ansi.StringWidth(m.identityLine()) <= pw-2*panelPad
 }
 
 const inputMaxLines = 6
@@ -298,10 +361,14 @@ func newChatInput() textarea.Model {
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	if m.phase == phaseChat {
-		return tea.Batch(textarea.Blink, m.connectCmd())
+	var images tea.Cmd
+	if m.cuteMode() {
+		images = tea.Raw(ansi.SetModeAltScreenSaveCursor + m.startMascot.upload + m.chatMascot.upload)
 	}
-	return m.listAgentsCmd()
+	if m.phase == phaseChat {
+		return tea.Batch(images, textarea.Blink, m.connectCmd())
+	}
+	return tea.Batch(images, m.listAgentsCmd())
 }
 
 // --- Commands ---
@@ -320,9 +387,10 @@ func (m *tuiModel) listAgentsCmd() tea.Cmd {
 			return agentsErrMsg{err: fmt.Errorf("listing agents: %s", connReason(err))}
 		}
 		return agentsMsg{
-			agents: resp.Agents,
-			conn:   conn,
-			client: client,
+			agents:      resp.Agents,
+			displayName: resp.GetDisplayName(),
+			conn:        conn,
+			client:      client,
 		}
 	}
 }
@@ -364,6 +432,9 @@ func (m *tuiModel) connectCmd() tea.Cmd {
 		}
 		msg.history = history
 		msg.running = ts.GetState() == commonpb.TurnState_TURN_STATE_WORKING
+		if la, err := msg.client.ListAgents(ctx, &commonpb.ListAgentsRequest{}); err == nil {
+			msg.displayName = la.GetDisplayName()
+		}
 		return msg
 	}
 }
@@ -479,6 +550,7 @@ func (m *tuiModel) subAgentCmd(command, path, text string) tea.Cmd {
 		}
 		ctx := grpcclient.WithToken(context.Background(), token)
 		var notices []string
+		var log *transcriptPart
 		var err error
 		switch command {
 		case "/subagents":
@@ -492,15 +564,8 @@ func (m *tuiModel) subAgentCmd(command, path, text string) tea.Cmd {
 		case "/log":
 			var resp *commonpb.GetConversationHistoryResponse
 			if resp, err = client.ReadSubAgentLog(ctx, &commonpb.ReadSubAgentLogRequest{Agent: agent, Path: path}); err == nil {
-				notices = []string{"log of " + path}
-				for _, e := range resp.GetEntries() {
-					if t := oneLine(entryText(e.GetMessage().GetContent())); t != "" {
-						if label := senderLabel(e.GetSender()); label != "" {
-							t = label + ": " + t
-						}
-						notices = append(notices, t)
-					}
-				}
+				part := logPart(path, resp.GetEntries())
+				log = &part
 			}
 		case "/msg":
 			if _, err = client.MessageSubAgent(ctx, &commonpb.MessageSubAgentRequest{Agent: agent, Path: path, Text: text}); err == nil {
@@ -512,8 +577,25 @@ func (m *tuiModel) subAgentCmd(command, path, text string) tea.Cmd {
 		if err != nil {
 			return subAgentMsg{err: fmt.Errorf("%s: %s", command, connReason(err))}
 		}
-		return subAgentMsg{notices: notices}
+		return subAgentMsg{notices: notices, log: log}
 	}
+}
+
+// logPart is the sub-agent chat at path: its messages and its replies.
+func logPart(path string, entries []*commonpb.HistoryEntry) transcriptPart {
+	speaker, _ := speakerOf(&commonpb.Sender{From: &commonpb.Sender_SubAgent{SubAgent: path}})
+	p := transcriptPart{kind: partLog, text: statusStyle.Render("log of " + path)}
+	for _, e := range entries {
+		text := entryText(e.GetMessage().GetContent())
+		switch {
+		case text == "":
+		case e.GetMessage().GetRole() == "assistant":
+			p.children = append(p.children, transcriptPart{kind: partReply, text: text, speaker: speaker})
+		case e.GetSender() != nil:
+			p.children = append(p.children, userPart(e))
+		}
+	}
+	return p
 }
 
 func (m *tuiModel) answerApprovalCmd(requestID string, approved bool) tea.Cmd {
@@ -563,6 +645,7 @@ func (m *tuiModel) applyConnected(msg connectedMsg) {
 	m.client = msg.client
 	m.stream = msg.stream
 	m.channelStreamID = msg.channelStreamID
+	m.displayName = msg.displayName
 	m.connected = true
 	m.backoff = initialBackoff
 	m.connErr = ""
@@ -615,6 +698,7 @@ func (m *tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentsMsg:
 		m.agents = msg.agents
+		m.displayName = msg.displayName
 		m.conn = msg.conn
 		m.client = msg.client
 		m.pickerLoading = false
@@ -672,7 +756,7 @@ func (m *tuiModel) remember(text string) {
 		m.recall = config.AddInputHistory(m.recall, text)
 		if !m.recallWarned {
 			m.recallWarned = true
-			m.commitNotice(errorStyle.Render("⚠ saving message history: " + err.Error()))
+			m.commitNotice(errorStyle, "⚠ saving message history: "+err.Error())
 		}
 	} else {
 		m.recall = saved
@@ -698,6 +782,9 @@ const startPanelMax = 75
 
 func (m *tuiModel) panelWidth() int {
 	if m.started {
+		if m.chatMascotFits() {
+			return m.width - m.chatMascot.cols
+		}
 		return m.width
 	}
 	return max(min(startPanelMax, m.width-2*panelPad), 1)
@@ -816,6 +903,27 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.sendMessage(text))
 		}
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft && m.started && msg.Y < m.viewport.Height() {
+			m.selecting = true
+			m.selFrom = m.cellAt(msg.X, msg.Y)
+			m.selTo = m.selFrom
+		}
+
+	case tea.MouseMotionMsg:
+		if m.selecting {
+			m.selTo = m.cellAt(msg.X, msg.Y)
+		}
+
+	case tea.MouseReleaseMsg:
+		if m.selecting {
+			m.selecting = false
+			m.selTo = m.cellAt(msg.X, msg.Y)
+			if m.selTo != m.selFrom {
+				cmds = append(cmds, m.copyText(m.selectedText()))
+			}
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -831,7 +939,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.recvCmd())
 
 	case connErrMsg:
-		m.connErr = oneLine(connReason(msg.err))
+		m.connErr = caretControls(oneLine(connReason(msg.err)), "")
 		cmds = append(cmds, m.retryCmd())
 
 	case retryTickMsg:
@@ -846,13 +954,13 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case answerErrMsg:
-		m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+		m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 		m.syncViewport()
 
 	case takeBackMsg:
 		switch {
 		case msg.err != nil:
-			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+			m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 			m.syncViewport()
 		case msg.taken:
 			m.returnToInput(msg.text)
@@ -863,7 +971,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case ingestErrMsg:
-		m.commitNotice(errorStyle.Render("⚠ sending message: " + connReason(msg.err)))
+		m.commitNotice(errorStyle, "⚠ sending message: "+connReason(msg.err))
 		m.returnToInput(msg.text)
 		m.syncViewport()
 
@@ -872,7 +980,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if msg.err != nil {
-			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+			m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 		} else {
 			old := m.transcript[:min(m.reloadFrom, len(m.transcript))]
 			live := m.transcript[len(old):]
@@ -892,20 +1000,23 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toolCalls = make(map[string]*toolRow)
 			m.textBuf.Reset()
 			m.renderHistory(msg.entries)
-			m.commitNotice(statusStyle.Render(msg.notice))
+			m.commitNotice(statusStyle, msg.notice)
 		}
 		if msg.err != nil {
-			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+			m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 		}
 		m.syncViewport()
 
 	case subAgentMsg:
 		m.started = true
 		for _, n := range msg.notices {
-			m.commitNotice(statusStyle.Render(n))
+			m.commitNotice(statusStyle, n)
+		}
+		if msg.log != nil {
+			m.transcript = append(m.transcript, *msg.log)
 		}
 		if msg.err != nil {
-			m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+			m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 		}
 		m.syncViewport()
 
@@ -917,7 +1028,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cancelErrMsg:
 		m.stopping = false
-		m.commitNotice(errorStyle.Render("⚠ " + msg.err.Error()))
+		m.commitNotice(errorStyle, "⚠ "+msg.err.Error())
 		m.syncViewport()
 
 	case streamErrMsg:
@@ -971,19 +1082,21 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) tea.Cmd
 			// The log holds the reply now. Reload so it shows once, even if
 			// the connect's history read already had it.
 			m.flushStreamingToCommitted()
-			m.endToolCalls(toolDone)
+			m.toolCalls = make(map[string]*toolRow)
 			m.input.Focus()
 			m.reloadGen++
 			m.reloadFrom = len(m.transcript)
 			return m.historyCmd(m.reloadGen)
 		case commonpb.TurnState_TURN_STATE_FAILED, commonpb.TurnState_TURN_STATE_CANCELLED:
 			notice := "⚠ Turn cancelled"
+			m.flushStreamingToCommitted()
 			if ts.State == commonpb.TurnState_TURN_STATE_FAILED {
 				notice = "⚠ Turn failed: " + oneLine(ts.Reason)
+				m.endToolCalls()
+			} else {
+				m.dropToolCalls()
 			}
-			m.flushStreamingToCommitted()
-			m.endToolCalls(toolEnded)
-			m.commitNotice(errorStyle.Render(notice))
+			m.commitNotice(errorStyle, notice)
 			m.input.Focus()
 		}
 	case *commonpb.ChannelStreamOutbound_StreamItem:
@@ -1000,16 +1113,16 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) tea.Cmd
 			return m.resetCmd("context compacted")
 		}
 	case *commonpb.ChannelStreamOutbound_SubAgentStarted:
-		m.commitNotice(statusStyle.Render("sub-agent " + c.SubAgentStarted.GetPath() + " started"))
+		m.commitNotice(statusStyle, "sub-agent "+c.SubAgentStarted.GetPath()+" started")
 	case *commonpb.ChannelStreamOutbound_SubAgentFinished:
 		f := c.SubAgentFinished
 		if failure, ok := f.GetOutcome().(*commonpb.SubAgentFinished_Failure); ok {
-			m.commitNotice(errorStyle.Render("⚠ sub-agent " + f.GetPath() + " failed: " + oneLine(failure.Failure)))
+			m.commitNotice(errorStyle, "⚠ sub-agent "+f.GetPath()+" failed: "+oneLine(failure.Failure))
 		} else {
-			m.commitNotice(statusStyle.Render("sub-agent " + f.GetPath() + " finished: " + oneLine(f.GetAnswer())))
+			m.commitNotice(statusStyle, "sub-agent "+f.GetPath()+" finished: "+oneLine(f.GetAnswer()))
 		}
 	case *commonpb.ChannelStreamOutbound_SubAgentStopped:
-		m.commitNotice(statusStyle.Render("sub-agent " + c.SubAgentStopped.GetPath() + " stopped"))
+		m.commitNotice(statusStyle, "sub-agent "+c.SubAgentStopped.GetPath()+" stopped")
 	}
 	return nil
 }
@@ -1032,17 +1145,35 @@ func (m *tuiModel) handleStreamItem(item *commonpb.StreamItem) {
 		}
 	case *commonpb.StreamItem_Stop:
 		if row, ok := m.toolCalls[item.ItemId]; ok {
-			row.state = toolDone
-			delete(m.toolCalls, item.ItemId)
+			if state, ok := toolStateOf(phase.Stop.GetOutcome()); ok {
+				row.state = state
+				delete(m.toolCalls, item.ItemId)
+			}
 		}
 	}
 }
 
-func (m *tuiModel) endToolCalls(state toolState) {
+func (m *tuiModel) endToolCalls() {
 	for id, row := range m.toolCalls {
-		row.state = state
+		row.state = toolFailed
 		delete(m.toolCalls, id)
 	}
+}
+
+// dropToolCalls takes every open call out of the transcript.
+func (m *tuiModel) dropToolCalls() {
+	open := make(map[*toolRow]bool, len(m.toolCalls))
+	for _, row := range m.toolCalls {
+		open[row] = true
+	}
+	kept := m.transcript[:0]
+	for _, p := range m.transcript {
+		if p.kind != partTool || !open[p.tool] {
+			kept = append(kept, p)
+		}
+	}
+	m.transcript = kept
+	m.toolCalls = make(map[string]*toolRow)
 }
 
 // --- Display helpers ---
@@ -1056,13 +1187,20 @@ const (
 	partReply
 	partNotice
 	partTool
+	partLog
 )
 
+// transcriptPart is one block of the transcript. speaker names who sent a
+// message or reply, and agent says an agent did. label is the bottom row of
+// a message from sycophant. A log holds a sub-agent's chat in children.
 type transcriptPart struct {
 	kind       partKind
 	text       string
+	speaker    string
+	agent      bool
 	label      string
 	tool       *toolRow
+	children   []transcriptPart
 	drawn      string
 	drawnWidth int
 }
@@ -1071,52 +1209,89 @@ func (p *transcriptPart) render(width int) string {
 	indent := strings.Repeat(" ", replyIndent)
 	switch p.kind {
 	case partUser:
-		return messagePanel(p.text, p.label, width)
+		bar := accentCyan
+		if p.agent {
+			bar = accentPink
+		}
+		return messagePanel(caretControls(p.text, keepInBody), p.speaker, p.label, bar, width)
 	case partReply:
 		if p.drawnWidth != width || p.drawn == "" {
-			p.drawn, p.drawnWidth = renderReply(p.text, width), width
+			p.drawn, p.drawnWidth = withSpeaker(p.speaker, renderReply(caretControls(p.text, keepInBody), width), width), width
 		}
 		return p.drawn
 	case partTool:
 		return indent + p.tool.render(max(width-replyIndent, 1))
+	case partLog:
+		out := []string{indent + p.text}
+		for i := range p.children {
+			if s := p.children[i].render(width); !isBlank(s) {
+				out = append(out, s)
+			}
+		}
+		return strings.Join(out, "\n\n")
 	default:
 		return indent + p.text
 	}
 }
 
-// messagePanel draws a sent message, with label on its bottom row.
-func messagePanel(text, label string, width int) string {
+// messagePanel draws a sent message on a bar of colour c, with speaker on
+// the line above it and label on its bottom row.
+func messagePanel(text, speaker, label string, c color.Color, width int) string {
 	w := inputWidth(width)
 	rows := append([]string{""}, strings.Split(ansi.Wrap(text, w, ""), "\n")...)
-	bar := panelBar(panelAccent)
-	out := make([]string, len(rows), len(rows)+1)
-	for i, r := range rows {
-		out[i] = panelRow(bar, panelFill.Render(r), width)
+	bar := panelBar(c)
+	out := make([]string, 0, len(rows)+2)
+	if speaker != "" {
+		out = append(out, speakerLine(speaker, width))
+	}
+	for _, r := range rows {
+		out = append(out, panelRow(bar, panelFill.Render(r), width))
 	}
 	out = append(out, panelRow(bar, panelDim.Render(label), width))
 	return strings.Join(out, "\n")
 }
 
-func senderLabel(s *commonpb.Sender) string {
-	switch s.GetFrom().(type) {
+// speakerOf is the speaker line text for a message from s, and whether an
+// agent sent it. Sycophant and a missing sender have no speaker.
+func speakerOf(s *commonpb.Sender) (speaker string, agent bool) {
+	switch from := s.GetFrom().(type) {
 	case *commonpb.Sender_Person:
-		return "person"
+		return caretControls(cmp.Or(s.GetDisplayName(), from.Person), "") + " · person", false
 	case *commonpb.Sender_SubAgent:
-		return "sub-agent"
+		name, _, _ := strings.Cut(from.SubAgent, "/")
+		return caretControls(name, "") + " · sub-agent", true
 	case *commonpb.Sender_ParentAgent:
-		return "parent agent"
-	case *commonpb.Sender_Sycophant:
-		return "sycophant"
+		return caretControls(from.ParentAgent, "") + " · parent", true
 	}
-	return ""
+	return "", false
+}
+
+func userPart(e *commonpb.HistoryEntry) transcriptPart {
+	speaker, agent := speakerOf(e.GetSender())
+	p := transcriptPart{kind: partUser, text: entryText(e.GetMessage().GetContent()), speaker: speaker, agent: agent}
+	if _, ok := e.GetSender().GetFrom().(*commonpb.Sender_Sycophant); ok {
+		p.label = "sycophant"
+	}
+	return p
+}
+
+func speakerLine(speaker string, width int) string {
+	return strings.Repeat(" ", replyIndent) + statusStyle.Render(ansi.Truncate(speaker, max(width-replyIndent, 0), "…"))
+}
+
+func withSpeaker(speaker, body string, width int) string {
+	if speaker == "" {
+		return body
+	}
+	return speakerLine(speaker, width) + "\n" + body
 }
 
 // replyStyle is glamour's dark style with the document's margin set to
-// replyIndent, so rendered text starts in that column, and without the
-// blank line the document opens and closes with.
+// panelPad, so rendered text starts right of the reply's bar, and without
+// the blank line the document opens and closes with.
 var replyStyle = func() glamouransi.StyleConfig {
 	s := styles.DarkStyleConfig
-	margin := uint(replyIndent)
+	margin := uint(panelPad)
 	s.Document.Margin = &margin
 	s.Document.BlockPrefix = ""
 	s.Document.BlockSuffix = ""
@@ -1124,7 +1299,7 @@ var replyStyle = func() glamouransi.StyleConfig {
 }()
 
 func renderReply(raw string, width int) string {
-	r, _ := glamour.NewTermRenderer(glamour.WithStyles(replyStyle), glamour.WithWordWrap(width))
+	r, _ := glamour.NewTermRenderer(glamour.WithStyles(replyStyle), glamour.WithWordWrap(max(width-1, 1)))
 	if out, err := r.Render(raw); err == nil {
 		lines := strings.Split(out, "\n")
 		for len(lines) > 0 && isBlank(lines[0]) {
@@ -1133,21 +1308,33 @@ func renderReply(raw string, width int) string {
 		for len(lines) > 0 && isBlank(lines[len(lines)-1]) {
 			lines = lines[:len(lines)-1]
 		}
-		return strings.Join(lines, "\n")
+		return onReplyBar(lines)
 	}
 	return liveReply(raw, width)
 }
 
 func liveReply(raw string, width int) string {
-	indent := strings.Repeat(" ", replyIndent)
-	wrapped := ansi.Wrap(strings.TrimSpace(raw), max(width-2*replyIndent, 1), "")
-	return indent + strings.ReplaceAll(wrapped, "\n", "\n"+indent)
+	indent := strings.Repeat(" ", panelPad)
+	wrapped := ansi.Wrap(strings.TrimSpace(raw), max(width-1-2*panelPad, 1), "")
+	lines := strings.Split(wrapped, "\n")
+	for i, l := range lines {
+		lines[i] = indent + l
+	}
+	return onReplyBar(lines)
+}
+
+func onReplyBar(lines []string) string {
+	bar := panelBar(accentPink)
+	for i, l := range lines {
+		lines[i] = bar + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 func isBlank(s string) bool { return strings.TrimSpace(ansi.Strip(s)) == "" }
 
-func (m *tuiModel) commitNotice(s string) {
-	m.transcript = append(m.transcript, transcriptPart{kind: partNotice, text: s})
+func (m *tuiModel) commitNotice(style lipgloss.Style, text string) {
+	m.transcript = append(m.transcript, transcriptPart{kind: partNotice, text: style.Render(caretControls(text, keepInBody))})
 }
 
 // keepNotices puts old's notices into rendered, a fresh render of the
@@ -1158,7 +1345,7 @@ func keepNotices(old, rendered []transcriptPart) []transcriptPart {
 	for _, p := range rendered {
 		if p.kind == partUser {
 			for ; len(old) > 0 && old[0].kind != partUser; old = old[1:] {
-				if old[0].kind == partNotice {
+				if old[0].kind == partNotice || old[0].kind == partLog {
 					out = append(out, old[0])
 				}
 			}
@@ -1169,16 +1356,20 @@ func keepNotices(old, rendered []transcriptPart) []transcriptPart {
 		out = append(out, p)
 	}
 	for _, p := range old {
-		if p.kind == partNotice {
+		if p.kind == partNotice || p.kind == partLog {
 			out = append(out, p)
 		}
 	}
 	return out
 }
 
+func (m *tuiModel) mainSpeaker() string {
+	return caretControls(m.profile.Agent, "") + " · main"
+}
+
 func (m *tuiModel) commitAssistant(raw string) {
 	m.started = true
-	m.transcript = append(m.transcript, transcriptPart{kind: partReply, text: raw})
+	m.transcript = append(m.transcript, transcriptPart{kind: partReply, text: raw, speaker: m.mainSpeaker()})
 }
 
 func (m *tuiModel) flushStreamingToCommitted() {
@@ -1190,9 +1381,24 @@ func (m *tuiModel) flushStreamingToCommitted() {
 }
 
 // renderHistory commits a conversation's history: user and assistant text
-// and the assistant's tool calls. Tool results, non-text blocks and clear
-// and compact entries are not shown.
+// and the assistant's tool calls, each ending as its saved result says.
+// Tool results, non-text blocks and clear and compact entries are not shown.
 func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
+	ended := map[string]toolState{}
+	for _, e := range entries {
+		msg := e.GetMessage()
+		if msg.GetRole() != "tool" {
+			continue
+		}
+		state, ok := toolStateOf(e.GetOutcome())
+		if !ok {
+			state = toolDone
+			if msg.GetIsError() {
+				state = toolFailed
+			}
+		}
+		ended[msg.GetToolCallId()] = state
+	}
 	for _, e := range entries {
 		msg := e.GetMessage()
 		if msg == nil || e.GetKind() != commonpb.EntryKind_ENTRY_KIND_MESSAGE {
@@ -1201,13 +1407,13 @@ func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
 		switch msg.GetRole() {
 		case "user":
 			m.started = true
-			m.transcript = append(m.transcript, transcriptPart{kind: partUser, text: entryText(msg.GetContent()), label: senderLabel(e.GetSender())})
+			m.transcript = append(m.transcript, userPart(e))
 		case "assistant":
 			if text := entryText(msg.GetContent()); text != "" {
 				m.commitAssistant(text)
 			}
 			for _, tc := range msg.GetToolCalls() {
-				row := &toolRow{name: tc.GetName(), state: toolDone}
+				row := &toolRow{name: tc.GetName(), state: ended[tc.GetId()]}
 				row.input.WriteString(tc.GetInputJson())
 				m.transcript = append(m.transcript, transcriptPart{kind: partTool, tool: row})
 			}
@@ -1240,7 +1446,7 @@ func (m *tuiModel) syncViewport() {
 		block(p.render(m.width), p.kind == partTool)
 	}
 	if m.textBuf.Len() > 0 {
-		block(liveReply(m.textBuf.String(), m.width), false)
+		block(withSpeaker(m.mainSpeaker(), liveReply(caretControls(m.textBuf.String(), keepInBody), m.width), m.width), false)
 	}
 	content := full.String()
 	if content != "" {
@@ -1250,6 +1456,72 @@ func (m *tuiModel) syncViewport() {
 	if m.userAtBottom {
 		m.viewport.GotoBottom()
 	}
+}
+
+func copyToClipboard(text string) tea.Cmd {
+	return func() tea.Msg {
+		_ = clipboard.WriteAll(text)
+		return tea.SetClipboard(text)()
+	}
+}
+
+type cell struct{ line, col int }
+
+func (m *tuiModel) cellAt(x, y int) cell {
+	return cell{line: m.viewport.YOffset() + min(max(y, 0), m.viewport.Height()-1), col: max(x, 0)}
+}
+
+func (m *tuiModel) selection() (from, to cell) {
+	from, to = m.selFrom, m.selTo
+	if to.line < from.line || (to.line == from.line && to.col < from.col) {
+		from, to = to, from
+	}
+	return from, to
+}
+
+func (m *tuiModel) selectedSpan(line, width int) (lo, hi int) {
+	from, to := m.selection()
+	lo, hi = 0, width
+	if line == from.line {
+		lo = from.col
+	}
+	if line == to.line {
+		hi = to.col + 1
+	}
+	return lo, hi
+}
+
+func (m *tuiModel) selectedText() string {
+	from, to := m.selection()
+	lines := strings.Split(m.viewport.GetContent(), "\n")
+	var out []string
+	for i := from.line; i <= to.line && i < len(lines); i++ {
+		plain := ansi.Strip(lines[i])
+		lo, hi := m.selectedSpan(i, ansi.StringWidth(plain))
+		if strings.Trim(ansi.Cut(plain, 0, replyIndent), "┃ ") == "" {
+			lo = max(lo, replyIndent)
+		}
+		out = append(out, strings.TrimRight(ansi.Cut(plain, lo, hi), " "))
+	}
+	return strings.Join(out, "\n")
+}
+
+func (m *tuiModel) transcriptView() string {
+	view := m.viewport.View()
+	if !m.selecting || m.selFrom == m.selTo {
+		return view
+	}
+	from, to := m.selection()
+	rows := strings.Split(view, "\n")
+	for y := range rows {
+		line := m.viewport.YOffset() + y
+		if line < from.line || line > to.line {
+			continue
+		}
+		lo, hi := m.selectedSpan(line, m.width)
+		rows[y] = ansi.Cut(rows[y], 0, lo) + selectionStyle.Render(ansi.Strip(ansi.Cut(rows[y], lo, hi))) + ansi.Cut(rows[y], hi, m.width)
+	}
+	return strings.Join(rows, "\n")
 }
 
 func entryText(blocks []*commonpb.ContentBlock) string {
@@ -1262,12 +1534,37 @@ func entryText(blocks []*commonpb.ContentBlock) string {
 	return b.String()
 }
 
+// keepInBody are the control characters a message body keeps.
+const keepInBody = "\n\t"
+
+// caretControls is s with each control character not in keep shown as
+// text, so text from the wire can't drive the terminal: ESC as ^[, DEL as ^?
+// and a C1 control as \u0085.
+func caretControls(s, keep string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case strings.ContainsRune(keep, r):
+			b.WriteRune(r)
+		case r < 0x20:
+			b.WriteString("^" + string(r+'@'))
+		case r == 0x7f:
+			b.WriteString("^?")
+		case r >= 0x80 && r <= 0x9f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // --- View ---
 
 func (m *tuiModel) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeAllMotion
+	v.MouseMode = tea.MouseModeCellMotion
 	if m.quitting {
 		return v
 	}
@@ -1287,7 +1584,7 @@ func (m *tuiModel) viewPicker() string {
 	b.WriteString("\n")
 	b.WriteString(pickerTitle.Render("  sycophant"))
 	b.WriteString("\n")
-	b.WriteString(statusStyle.Render(fmt.Sprintf("  %s · %s", m.subject, m.profile.Server)))
+	b.WriteString(statusStyle.Render(fmt.Sprintf("  %s · %s", m.who(), m.profile.Server)))
 	b.WriteString("\n\n")
 
 	if m.pickerLoading {
@@ -1297,7 +1594,7 @@ func (m *tuiModel) viewPicker() string {
 	}
 
 	if m.err != nil {
-		b.WriteString(errorStyle.Render("  ⚠ " + m.err.Error()))
+		b.WriteString(errorStyle.Render("  ⚠ " + caretControls(m.err.Error(), "")))
 		b.WriteString("\n")
 		return b.String()
 	}
@@ -1312,6 +1609,7 @@ func (m *tuiModel) viewPicker() string {
 	b.WriteString("\n\n")
 
 	for i, agent := range m.agents {
+		agent = caretControls(agent, "")
 		if i == m.pickerCursor {
 			b.WriteString(pickerSelected.Render("› " + agent))
 		} else {
@@ -1334,7 +1632,23 @@ func (m *tuiModel) viewChat() string {
 	if !m.started {
 		return m.viewStart()
 	}
-	return m.viewport.View() + "\n" + m.viewPanel(m.width) + "\n" + m.viewFooter(m.width)
+	pw := m.panelWidth()
+	panel, footer := m.viewPanel(pw), m.viewFooter(pw)
+	if m.chatMascotFits() {
+		panel = lipgloss.JoinHorizontal(lipgloss.Bottom, m.chatMascot.art, panel)
+		footer = strings.Repeat(" ", m.chatMascot.cols) + footer
+	}
+	return m.transcriptView() + "\n" + fitChrome(panel, footer, m.height-m.viewport.Height())
+}
+
+func fitChrome(panel, footer string, room int) string {
+	rows := append(strings.Split(panel, "\n"), footer)
+	n := len(rows)
+	cut := panelChrome - min(max(room-(n-panelChrome), 0), panelChrome)
+	if cut == panelChrome {
+		return strings.Join(rows[1:n-cut+1], "\n")
+	}
+	return strings.Join(rows[:n-cut], "\n")
 }
 
 func (m *tuiModel) viewStart() string {
@@ -1357,7 +1671,11 @@ func (m *tuiModel) viewStart() string {
 	room := m.height - 1
 	logoW, logoH := lipgloss.Size(logo)
 	if m.width >= logoW && room >= logoH+1+lipgloss.Height(group) {
-		group = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, logoStyle.Render(logo)) + "\n\n" + group
+		head := logoStyle.Render(logo)
+		if m.cuteMode() && m.width >= m.startMascot.cols+1+logoW && room >= max(m.startMascot.rows, logoH)+1+lipgloss.Height(group) {
+			head = lipgloss.JoinHorizontal(lipgloss.Bottom, m.startMascot.art, " ", head)
+		}
+		group = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, head) + "\n\n" + group
 	}
 
 	dot := lipgloss.NewStyle().Foreground(connectedDot)
@@ -1389,11 +1707,11 @@ func (m *tuiModel) viewPanel(width int) string {
 		body = strings.Split(m.input.View(), "\n")
 	}
 	w := inputWidth(width)
-	info := ansi.Truncate(panelAccentText.Render("Default")+panelDim.Render(" · "+m.profile.Agent), w, "…")
+	info := ansi.Truncate(panelDim.Render(caretControls(m.profile.Agent, "")), w, "…")
 
 	rows := append([]string{""}, body...)
 	rows = append(rows, "", info)
-	c := panelAccent
+	c := accentCyan
 	switch {
 	case !m.connected:
 		c = panelDisconnected
@@ -1428,9 +1746,13 @@ func (m *tuiModel) viewFooter(width int) string {
 	case m.running:
 		return lineWithHints(width, statusStyle.Render("working…"), statusStyle.Render("esc take back · stop"))
 	}
-	identity := m.subject
-	if identity == "" {
-		identity = "unknown"
-	}
-	return lineWithHints(width, statusStyle.Render(identity+" · "+m.profile.Server), statusStyle.Render("shift+enter newline"))
+	return lineWithHints(width, statusStyle.Render(m.identityLine()), statusStyle.Render("shift+enter newline"))
+}
+
+func (m *tuiModel) identityLine() string {
+	return cmp.Or(m.who(), "unknown") + " · " + m.profile.Server
+}
+
+func (m *tuiModel) who() string {
+	return caretControls(cmp.Or(m.displayName, m.subject), "")
 }

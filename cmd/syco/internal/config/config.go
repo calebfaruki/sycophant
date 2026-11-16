@@ -20,9 +20,10 @@ import (
 
 // Profile holds the resolved configuration for the active profile.
 type Profile struct {
-	Name   string
-	Server string
-	Agent  string
+	Name    string
+	Server  string
+	Agent   string
+	Minimal bool
 }
 
 // configFile is the TOML structure of config.toml.
@@ -33,6 +34,7 @@ type configFile struct {
 
 type defaultSection struct {
 	Profile string `toml:"profile"`
+	Minimal bool   `toml:"minimal,omitempty"`
 }
 
 type profileSection struct {
@@ -100,9 +102,10 @@ func LoadProfile(configDir, profileFlag string) (*Profile, error) {
 	}
 
 	return &Profile{
-		Name:   name,
-		Server: server,
-		Agent:  agent,
+		Name:    name,
+		Server:  server,
+		Agent:   agent,
+		Minimal: cfg.Default.Minimal,
 	}, nil
 }
 

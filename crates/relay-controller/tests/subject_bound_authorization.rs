@@ -35,9 +35,9 @@ use shared::auth::CHANNEL_RELAY_AUDIENCE;
 
 mod common;
 use common::apiserver::{
-    assert_cut_on_next_item, bearer, bearer_classed, first_ack, load_identities, next_item,
-    state_for, state_with_harness, stream_err, K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN,
-    CHANNEL_SLACK, CHANNEL_TOKEN,
+    assert_cut_on_next_item, bearer, bearer_classed, first_ack, load_identities,
+    load_named_identity, next_item, state_for, state_with_harness, stream_err, K8s, ALICE,
+    ALICE_TOKEN, BOB, BOB_TOKEN, CHANNEL_SLACK, CHANNEL_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness};
 use common::NAMESPACE;
@@ -65,6 +65,7 @@ fn call_tool(agent: &str) -> CallToolRequest {
         input_json: "{}".into(),
         agent: agent.into(),
         sender: String::new(),
+        sender_name: String::new(),
     }
 }
 
@@ -168,6 +169,7 @@ async fn each_agent_command_from_a_denied_subject_is_refused_without_a_harness_d
                 ClearContextRequest {
                     agent: "gamma".into(),
                     sender: String::new(),
+                    sender_name: String::new(),
                 },
             ))),
         ),
@@ -178,6 +180,7 @@ async fn each_agent_command_from_a_denied_subject_is_refused_without_a_harness_d
                 CompactContextRequest {
                     agent: "gamma".into(),
                     sender: String::new(),
+                    sender_name: String::new(),
                 },
             ))),
         ),
@@ -209,6 +212,7 @@ async fn each_agent_command_from_a_denied_subject_is_refused_without_a_harness_d
                     path: "scout".into(),
                     text: "hello".into(),
                     sender: String::new(),
+                    sender_name: String::new(),
                 },
             ))),
         ),
@@ -705,6 +709,46 @@ async fn a_removed_handle_binding_cuts_an_open_channel_opened_stream() {
         err.message()
             .contains("sender has no operator handle binding"),
         "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_channel_senders_message_carries_the_display_name_of_the_person_its_handle_maps_to() {
+    let k8s = alice_bob_and_channel();
+    let state = state_for(&k8s, &[]).await;
+    load_named_identity(
+        &state,
+        ("user-alice", ALICE, "alpha", &[("slack", "U0123ABCDEF")]),
+        "Alice Liddell",
+    )
+    .await;
+    let svc = GatewayService::new(state.clone());
+    let mut harness_bus = state.subscribe_or_create("alpha").await;
+
+    let ch = open_channel_stream(
+        &svc,
+        bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
+            receive("alpha", "U0123ABCDEF"),
+        ),
+    )
+    .await;
+    svc.channel_stream_ingest(bearer_classed(
+        CHANNEL_TOKEN,
+        ListenerClass::ChannelToken,
+        ingest(&ch),
+    ))
+    .await
+    .expect("bound: the ingest is accepted");
+
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(5), harness_bus.recv())
+        .await
+        .expect("the message must reach the harness bus")
+        .unwrap();
+    assert_eq!(
+        (queued.sender.as_str(), queued.sender_name.as_str()),
+        (ALICE, "Alice Liddell")
     );
 }
 

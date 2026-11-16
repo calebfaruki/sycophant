@@ -33,7 +33,7 @@ func TestTUISubagentsCommandListsTheAgentsSubAgents(t *testing.T) {
 }
 
 func TestTUILogCommandShowsTheSubAgentsConversation(t *testing.T) {
-	f, d, _ := startedTUI(t, "UserBeforeLogPuffin")
+	f, d, s := startedTUI(t, "UserBeforeLogPuffin")
 	f.setSubAgentLog(sentBy(parentAgentSender(testAgent), "LogTaskBittern"), assistantEntry("LogAnswerBittern"))
 	d.typeEnter("/log scout/LogPathCurlew")
 
@@ -48,11 +48,30 @@ func TestTUILogCommandShowsTheSubAgentsConversation(t *testing.T) {
 		tr := d.transcript()
 		return strings.Contains(tr, "LogTaskBittern") && strings.Contains(tr, "LogAnswerBittern")
 	})
-	if !strings.Contains(d.transcript(), "parent agent: LogTaskBittern") {
-		t.Fatalf("the mandate row does not read parent agent: LogTaskBittern:\n%s", d.transcript())
+	lines := d.transcriptLines()
+	for _, c := range []struct{ text, speaker string }{
+		{"LogTaskBittern", testAgent + " · parent"},
+		{"LogAnswerBittern", "scout · sub-agent"},
+	} {
+		if got := speakerAbove(lines, c.text); got != c.speaker {
+			t.Fatalf("above %s is %q, want %q:\n%s", c.text, got, c.speaker, d.transcript())
+		}
+		if !strings.Contains(d.rawLineWith(c.text), panelBar(brandPink)) {
+			t.Fatalf("%s does not have its bar in the agent colour:\n%q", c.text, d.rawLineWith(c.text))
+		}
 	}
 	if n := len(f.ingestLog()); n != 0 {
 		t.Fatalf("/log sent %d chat messages, want none", n)
+	}
+
+	s.push(turnStateFrame("msg-log-idle", commonpb.TurnState_TURN_STATE_IDLE))
+	d.waitReload("the idle reload")
+	d.send("UserAfterLogTern")
+	d.startTurn(s, "msg-log-turn", "UserAfterLogTern")
+	d.finishTurn(s, "msg-log-turn")
+	d.waitReload("the turn end's reload")
+	if !strings.Contains(d.transcript(), "LogTaskBittern") {
+		t.Fatalf("the sub-agent's conversation is gone after the reloads:\n%s", d.transcript())
 	}
 }
 

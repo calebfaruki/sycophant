@@ -1,11 +1,12 @@
 //! Identity parsing for the `relay-identity` ConfigMaps — the relay's
-//! agent-list and handle-binding table.
+//! agent-list, display-name and handle-binding table.
 //!
-//! One ConfigMap is one subject: `subject`, `agents` (a comma list), and
-//! `handle.<channel>` keys naming that channel's platform user ID. The table
-//! answers two questions and only these: which agents a subject reaches
-//! (ListAgents), and which subject a channel handle resolves to (the
-//! channel path). Authorization itself is not here — every request is checked
+//! One ConfigMap is one subject: `subject`, `agents` (a comma list), an
+//! optional `display-name`, and `handle.<channel>` keys naming that channel's
+//! platform user ID. The table answers three questions and only these: which
+//! agents a subject reaches (ListAgents), which subject a channel handle
+//! resolves to (the channel path), and what name a subject goes by (its
+//! display name). Authorization itself is not here — every request is checked
 //! by a Kubernetes review; this table only names the list and resolves
 //! senders.
 //!
@@ -33,6 +34,7 @@ pub struct RowError {
 pub struct IdentityTable {
     by_subject: HashMap<String, Vec<String>>,
     handles: HashMap<(String, String), String>,
+    names: HashMap<String, String>,
 }
 
 impl IdentityTable {
@@ -48,14 +50,19 @@ impl IdentityTable {
             .get(&(channel.to_string(), handle.to_string()))
             .map(String::as_str)
     }
+
+    pub fn display_name(&self, subject: &str) -> Option<&str> {
+        self.names.get(subject).map(String::as_str)
+    }
 }
 
-/// One ConfigMap's data: the subject, its agent list, and its
-/// `(channel, platform user ID)` handle pairs.
+/// One ConfigMap's data: the subject, its agent list, its display name, and
+/// its `(channel, platform user ID)` handle pairs.
 struct SubjectRow {
     subject: String,
     agents: Vec<String>,
     handles: Vec<(String, String)>,
+    display_name: Option<String>,
 }
 
 /// Parse and validate one ConfigMap, independently of every other.
@@ -87,10 +94,16 @@ fn parse_configmap(data: &BTreeMap<String, String>) -> Result<SubjectRow, String
             handles.push((channel.to_string(), value.trim().to_string()));
         }
     }
+    let display_name = data
+        .get("display-name")
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
     Ok(SubjectRow {
         subject,
         agents,
         handles,
+        display_name,
     })
 }
 
@@ -105,6 +118,7 @@ pub fn apply_delivery(cms: &[ConfigMap]) -> (IdentityTable, Vec<RowError>) {
     let mut by_subject: HashMap<String, Vec<String>> = HashMap::new();
     // (channel, handle) → the subjects claiming it, in delivery order.
     let mut handle_claims: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut names = HashMap::new();
     let mut errors = Vec::new();
 
     for cm in cms {
@@ -115,6 +129,10 @@ pub fn apply_delivery(cms: &[ConfigMap]) -> (IdentityTable, Vec<RowError>) {
             .unwrap_or_else(|| "<unnamed>".to_string());
         match parse_configmap(&cm.data.clone().unwrap_or_default()) {
             Ok(row) => {
+                match row.display_name {
+                    Some(name) => names.insert(row.subject.clone(), name),
+                    None => names.remove(&row.subject),
+                };
                 by_subject.insert(row.subject.clone(), row.agents);
                 for (channel, handle) in row.handles {
                     handle_claims
@@ -147,6 +165,7 @@ pub fn apply_delivery(cms: &[ConfigMap]) -> (IdentityTable, Vec<RowError>) {
         IdentityTable {
             by_subject,
             handles,
+            names,
         },
         errors,
     )
@@ -179,5 +198,43 @@ mod tests {
         )]);
         assert!(errors.is_empty());
         assert!(table.agents_for("https://issuer.example#alice").is_empty());
+    }
+
+    #[test]
+    fn display_name_is_the_trimmed_display_name_key_and_absent_when_unset_or_blank() {
+        let (table, errors) = apply_delivery(&[
+            cm(
+                "user-1",
+                &[
+                    ("subject", "https://issuer.example#alice"),
+                    ("display-name", "  Alice Liddell "),
+                ],
+            ),
+            cm(
+                "user-2",
+                &[
+                    ("subject", "https://issuer.example#bob"),
+                    ("display-name", "  "),
+                ],
+            ),
+            cm("user-3", &[("subject", "https://issuer.example#carol")]),
+            cm(
+                "user-4",
+                &[
+                    ("subject", "https://issuer.example#dave"),
+                    ("display-name", "Dave"),
+                ],
+            ),
+            cm("user-5", &[("subject", "https://issuer.example#dave ")]),
+        ]);
+        assert!(errors.is_empty());
+        assert_eq!(
+            table.display_name("https://issuer.example#alice"),
+            Some("Alice Liddell")
+        );
+        assert_eq!(table.display_name("https://issuer.example#bob"), None);
+        assert_eq!(table.display_name("https://issuer.example#carol"), None);
+        assert_eq!(table.display_name("https://issuer.example#dave"), None);
+        assert_eq!(table.display_name("Alice Liddell"), None);
     }
 }

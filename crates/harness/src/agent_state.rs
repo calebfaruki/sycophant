@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use proto_common::{text_block, Message, Sender};
+use proto_common::{text_block, Message, Sender, ToolOutcome};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -39,7 +39,8 @@ impl AgentState {
         }
         let store = Arc::new(LocalFsStore::new(root.clone(), archives));
         let mut log = ConversationLog::rebuild(store).await?;
-        log.close_open_calls(RESTART_TEXT).await?;
+        log.close_open_calls(RESTART_TEXT, ToolOutcome::Failed)
+            .await?;
         Ok(Self {
             log: RwLock::new(log),
             exec_log: Arc::new(LocalFsExecutionLog::new(root)),
@@ -232,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn open_writes_one_restart_entry_per_open_call_and_none_on_a_second_open() {
         use crate::conversation::{parse_ndjson, AssistantAttribution, LogEntry};
-        use proto_common::{content_text, text_block, Message, ToolCall};
+        use proto_common::{content_text, text_block, Message, ToolCall, ToolOutcome};
 
         const RESTART: &str =
             "The agent restarted while this was running. It may or may not have finished.";
@@ -314,6 +315,20 @@ mod tests {
             ],
             "open must write one restart entry per open call, in call order, and nothing for \
              the finished call"
+        );
+        let outcomes: Vec<_> = entries
+            .iter()
+            .skip(2)
+            .map(|e| (e.tool_call_id.clone().unwrap_or_default(), e.outcome))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("finished".to_string(), None),
+                ("awaiting-approval".to_string(), Some(ToolOutcome::Failed)),
+                ("running".to_string(), Some(ToolOutcome::Failed)),
+            ],
+            "a call closed by a restart is saved as failed"
         );
 
         let second = AgentState::open(tmp.path().to_path_buf(), 10)

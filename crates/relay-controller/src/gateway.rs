@@ -359,6 +359,16 @@ impl GatewayService {
         )))
     }
 
+    async fn display_name(&self, subject: &str) -> String {
+        self.state
+            .identity()
+            .read()
+            .await
+            .display_name(subject)
+            .unwrap_or_default()
+            .to_string()
+    }
+
     /// Authenticate the caller and return its person subject. A channel
     /// caller is refused.
     async fn person_subject<T>(&self, request: &Request<T>) -> Result<String, Status> {
@@ -471,11 +481,11 @@ impl RelayGateway for GatewayService {
     ) -> Result<Response<ListAgentsResponse>, Status> {
         let subject = self.person_subject(&request).await?;
         let identity = self.state.identity();
-        let agents = {
-            let table = identity.read().await;
-            table.agents_for(&subject)
-        };
-        Ok(Response::new(ListAgentsResponse { agents }))
+        let table = identity.read().await;
+        Ok(Response::new(ListAgentsResponse {
+            agents: table.agents_for(&subject),
+            display_name: table.display_name(&subject).unwrap_or_default().to_string(),
+        }))
     }
 
     async fn get_conversation_history(
@@ -531,9 +541,14 @@ impl RelayGateway for GatewayService {
     ) -> Result<Response<ClearContextResponse>, Status> {
         let agent = request.get_ref().agent.clone();
         let (sender, mut client) = self.authorized_harness(&request, &agent).await?;
+        let sender_name = self.display_name(&sender).await;
         client
             .as_mut()
-            .clear_context(ClearContextRequest { agent, sender })
+            .clear_context(ClearContextRequest {
+                agent,
+                sender,
+                sender_name,
+            })
             .await
     }
 
@@ -543,9 +558,14 @@ impl RelayGateway for GatewayService {
     ) -> Result<Response<CompactContextResponse>, Status> {
         let agent = request.get_ref().agent.clone();
         let (sender, mut client) = self.authorized_harness(&request, &agent).await?;
+        let sender_name = self.display_name(&sender).await;
         client
             .as_mut()
-            .compact_context(CompactContextRequest { agent, sender })
+            .compact_context(CompactContextRequest {
+                agent,
+                sender,
+                sender_name,
+            })
             .await
     }
 
@@ -580,9 +600,14 @@ impl RelayGateway for GatewayService {
             .authorized_harness(&request, &request.get_ref().agent)
             .await?;
         let req = request.into_inner();
+        let sender_name = self.display_name(&sender).await;
         client
             .as_mut()
-            .message_sub_agent(MessageSubAgentRequest { sender, ..req })
+            .message_sub_agent(MessageSubAgentRequest {
+                sender,
+                sender_name,
+                ..req
+            })
             .await
     }
 
@@ -677,6 +702,7 @@ impl RelayGateway for GatewayService {
                 // the harness echoes it on that turn's frames so a one-shot
                 // can tell its own turn from another person's.
                 let message_id = uuid::Uuid::new_v4().to_string();
+                let sender_name = self.display_name(&subject).await;
                 // The sender is the subject the channel stream is bound to,
                 // never the client's value.
                 self.state
@@ -687,6 +713,7 @@ impl RelayGateway for GatewayService {
                             sender: subject,
                             reply_channel_stream: Some(req.channel_stream_id.clone()),
                             message_id: message_id.clone(),
+                            sender_name,
                         },
                     )
                     .await;
@@ -840,6 +867,7 @@ impl RelayGateway for GatewayService {
         let (subject, mut client) = self.authorized_harness(&request, &agent).await?;
         let req = CallToolRequest {
             sender: subject.clone(),
+            sender_name: self.display_name(&subject).await,
             ..request.into_inner()
         };
         let resp = client.as_mut().dispatch_tool(req).await?;

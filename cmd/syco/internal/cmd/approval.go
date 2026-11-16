@@ -26,10 +26,11 @@ type toolApproval struct {
 }
 
 func (a toolApproval) prompt() string {
+	tool, input := caretControls(a.tool, ""), caretControls(a.input, keepInBody)
 	if a.dispatch != "" {
-		return fmt.Sprintf("⚙ %s: %s wants to run with input: %s", a.dispatch, a.tool, a.input)
+		return fmt.Sprintf("⚙ %s: %s wants to run with input: %s", caretControls(a.dispatch, ""), tool, input)
 	}
-	return fmt.Sprintf("⚙ %s wants to run with input: %s", a.tool, a.input)
+	return fmt.Sprintf("⚙ %s wants to run with input: %s", tool, input)
 }
 
 // toolApprovalOf reads a ServerRequest as an approval request. A request

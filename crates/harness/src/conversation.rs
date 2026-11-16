@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use proto_common::{
     content_block, image_block, text_content, ContentBlock, EntryKind, Message, Sender, ToolCall,
+    ToolOutcome,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -409,6 +410,8 @@ pub(crate) struct LogEntry {
     pub(crate) sender: Option<Sender>,
     #[serde(default, skip_serializing_if = "is_message")]
     pub(crate) kind: EntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) outcome: Option<ToolOutcome>,
 }
 
 fn is_message(kind: &EntryKind) -> bool {
@@ -429,6 +432,7 @@ struct Entry {
     message: Message,
     sender: Option<Sender>,
     kind: EntryKind,
+    outcome: Option<ToolOutcome>,
 }
 
 impl From<LogEntry> for Entry {
@@ -444,6 +448,7 @@ impl From<LogEntry> for Entry {
             },
             sender: log_entry.sender,
             kind: log_entry.kind,
+            outcome: log_entry.outcome,
         }
     }
 }
@@ -486,6 +491,7 @@ pub(crate) struct EntrySnapshot {
     pub(crate) message: Message,
     pub(crate) sender: Option<Sender>,
     pub(crate) kind: EntryKind,
+    pub(crate) outcome: Option<ToolOutcome>,
 }
 
 impl EntrySnapshot {
@@ -496,6 +502,7 @@ impl EntrySnapshot {
             message: entry.message,
             sender: entry.sender,
             kind: entry.kind,
+            outcome: entry.outcome,
         }
     }
 }
@@ -524,15 +531,34 @@ impl ConversationLog {
         Ok(Self { entries, store })
     }
 
+    #[cfg(test)]
     pub(crate) async fn append(&mut self, message: Message) -> Result<(), String> {
+        self.write(
+            message,
+            AssistantAttribution::default(),
+            None,
+            EntryKind::Message,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn append_tool_result(
+        &mut self,
+        message: Message,
+        outcome: ToolOutcome,
+    ) -> Result<(), String> {
         if message.role == "assistant" {
-            return Err("append rejects role=\"assistant\"; use append_assistant".to_string());
+            return Err(
+                "append_tool_result rejects role=\"assistant\"; use append_assistant".to_string(),
+            );
         }
         self.write(
             message,
             AssistantAttribution::default(),
             None,
             EntryKind::Message,
+            Some(outcome),
         )
         .await
     }
@@ -547,6 +573,7 @@ impl ConversationLog {
             AssistantAttribution::default(),
             Some(sender),
             EntryKind::Message,
+            None,
         )
         .await
     }
@@ -570,13 +597,18 @@ impl ConversationLog {
                 "refusing to persist assistant message with no content and no tool_calls".into(),
             );
         }
-        self.write(message, attribution, None, EntryKind::Message)
+        self.write(message, attribution, None, EntryKind::Message, None)
             .await
     }
 
     /// Give every tool call the model made that has no tool entry yet one
-    /// error entry holding `text`, in call order.
-    pub(crate) async fn close_open_calls(&mut self, text: &str) -> Result<(), String> {
+    /// error entry holding `text` and saved with `outcome`, in call order.
+    /// Returns the closed calls' ids.
+    pub(crate) async fn close_open_calls(
+        &mut self,
+        text: &str,
+        outcome: ToolOutcome,
+    ) -> Result<Vec<String>, String> {
         let open: Vec<String> = self
             .entries
             .iter()
@@ -588,17 +620,20 @@ impl ConversationLog {
                 })
             })
             .collect();
-        for id in open {
-            self.append(Message {
-                role: "tool".into(),
-                content: text_content(text),
-                tool_calls: vec![],
-                tool_call_id: Some(id),
-                is_error: Some(true),
-            })
+        for id in &open {
+            self.append_tool_result(
+                Message {
+                    role: "tool".into(),
+                    content: text_content(text),
+                    tool_calls: vec![],
+                    tool_call_id: Some(id.clone()),
+                    is_error: Some(true),
+                },
+                outcome,
+            )
             .await?;
         }
-        Ok(())
+        Ok(open)
     }
 
     async fn write(
@@ -607,12 +642,14 @@ impl ConversationLog {
         attribution: AssistantAttribution,
         sender: Option<Sender>,
         kind: EntryKind,
+        outcome: Option<ToolOutcome>,
     ) -> Result<(), String> {
         let entry = Entry {
             ts: Utc::now().to_rfc3339(),
             message,
             sender,
             kind,
+            outcome,
         };
         let log_entry = Self::entry_to_log_entry(&entry, attribution);
         self.store.append_event(&log_entry).await?;
@@ -634,6 +671,7 @@ impl ConversationLog {
             AssistantAttribution::default(),
             Some(sender),
             EntryKind::Clear,
+            None,
         )
         .await
     }
@@ -655,6 +693,7 @@ impl ConversationLog {
             AssistantAttribution::default(),
             Some(sender),
             EntryKind::Compact,
+            None,
         )
         .await
     }
@@ -714,6 +753,7 @@ impl ConversationLog {
             warnings: attribution.warnings,
             sender: entry.sender.clone(),
             kind: entry.kind,
+            outcome: entry.outcome,
         }
     }
 
@@ -757,15 +797,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_rejects_caller_supplied_assistant_role() {
+    async fn append_tool_result_rejects_caller_supplied_assistant_role() {
         let tmp = TempDir::new().unwrap();
         let mut log = ConversationLog::new(store_at(tmp.path()));
         let err = log
-            .append(text_msg("assistant", "forged"))
+            .append_tool_result(text_msg("assistant", "forged"), ToolOutcome::Canceled)
             .await
-            .expect_err("append must reject caller-supplied assistant role");
+            .expect_err("append_tool_result must reject caller-supplied assistant role");
         assert!(
-            err.contains("append rejects role=\"assistant\""),
+            err.contains("append_tool_result rejects role=\"assistant\""),
             "error message should name the rejected role, got: {err}"
         );
         assert!(
@@ -915,6 +955,56 @@ mod tests {
             texts_of(rebuilt.history_for_provider()),
             ["before", "after"],
             "the intact records still rebuild"
+        );
+    }
+
+    // Closing the open calls saves each one with the given outcome, in call
+    // order, and returns their ids. The outcome survives a rebuild. A result
+    // saved before outcomes existed rebuilds with none.
+    #[tokio::test]
+    async fn close_open_calls_saves_each_open_call_with_its_outcome_and_returns_their_ids() {
+        use proto_common::ToolOutcome;
+        let tmp = TempDir::new().unwrap();
+        let call = |id: &str| format!(r#"{{"id":"{id}","name":"Shell","input_json":"{{}}"}}"#);
+        let calls = format!(
+            r#"{{"ts":"t","role":"assistant","tool_calls":[{},{},{}]}}"#,
+            call("old"),
+            call("a"),
+            call("b")
+        );
+        let old_result = r#"{"ts":"t","role":"tool","content":[{"block":{"Text":{"text":"boom"}}}],"tool_call_id":"old","is_error":true}"#;
+        fs::write(
+            tmp.path().join("conversation.log"),
+            format!("{}{calls}\n{old_result}\n", record("user", "go")),
+        )
+        .unwrap();
+
+        let mut log = ConversationLog::rebuild(store_at(tmp.path()))
+            .await
+            .unwrap();
+        let closed = log
+            .close_open_calls("stopped", ToolOutcome::Canceled)
+            .await
+            .unwrap();
+        assert_eq!(closed, ["a", "b"], "the closed calls' ids, in call order");
+
+        let rebuilt = ConversationLog::rebuild(store_at(tmp.path()))
+            .await
+            .unwrap();
+        let outcomes: Vec<_> = rebuilt
+            .snapshot(None)
+            .entries
+            .into_iter()
+            .filter(|e| e.message.role == "tool")
+            .map(|e| (e.message.tool_call_id.unwrap_or_default(), e.outcome))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("old".to_string(), None),
+                ("a".to_string(), Some(ToolOutcome::Canceled)),
+                ("b".to_string(), Some(ToolOutcome::Canceled)),
+            ]
         );
     }
 

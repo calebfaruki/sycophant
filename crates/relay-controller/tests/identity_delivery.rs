@@ -3,11 +3,12 @@
 //! forward from an earlier delivery, and never able to suppress the subjects
 //! beside it.
 //!
-//! One ConfigMap is one subject: `subject`, `agents` (a comma list), and
-//! `handle.<channel>` keys naming that channel's platform user ID. The table
-//! answers two questions and only these: which agents a subject reaches
-//! (ListAgents), and which subject a channel handle resolves to (the
-//! channel path). A handle that no operator bound resolves to nothing.
+//! One ConfigMap is one subject: `subject`, `agents` (a comma list), an
+//! optional `display-name`, and `handle.<channel>` keys naming that channel's
+//! platform user ID. The table answers three questions and only these: which
+//! agents a subject reaches (ListAgents), which subject a channel handle
+//! resolves to (the channel path), and what name a subject goes by (its
+//! display name). A handle that no operator bound resolves to nothing.
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use relay_controller::identity::{apply_delivery, IdentityTable};

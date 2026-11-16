@@ -64,6 +64,7 @@ message Sender {
     string parent_agent = 3;
     bool sycophant = 4;
   }
+  optional string display_name = 5;
 }
 
 // What a conversation entry is. A clear entry has no content and the model
@@ -87,6 +88,7 @@ message ListAgentsRequest {}
 
 message ListAgentsResponse {
   repeated string agents = 1;
+  string display_name = 2;
 }
 
 // --- Channel stream I/O ---
@@ -184,7 +186,10 @@ message ItemDelta {
   }
 }
 
-message ItemStop {}
+message ItemStop {
+  // Set on a tool item's stop, unset on a text stop.
+  ToolOutcome outcome = 1;
+}
 
 message ChannelStreamSend {
   repeated ContentBlock content = 1;
@@ -245,6 +250,7 @@ message UserMessage {
   // Minted fresh by the relay for each ingested user message; never
   // accepted from a client. The harness echoes it on that turn's frames.
   string message_id = 6;
+  string sender_name = 7;
   reserved 4, 5;
   reserved "conversation_id", "grants";
 }
@@ -281,6 +287,8 @@ message HistoryEntry {
   // Set on a user entry.
   Sender sender = 5;
   EntryKind kind = 6;
+  // Set on a tool result entry, unset on entries saved before this field.
+  ToolOutcome outcome = 7;
 }
 
 message GetTurnStateRequest {
@@ -322,6 +330,7 @@ message ClearContextRequest {
   // Set only by the relay, to the caller's authenticated subject; any
   // client-supplied value is ignored.
   string sender = 2;
+  string sender_name = 3;
 }
 
 message ClearContextResponse {}
@@ -333,6 +342,7 @@ message CompactContextRequest {
   // Set only by the relay, to the caller's authenticated subject; any
   // client-supplied value is ignored.
   string sender = 2;
+  string sender_name = 3;
 }
 
 message CompactContextResponse {}
@@ -360,6 +370,7 @@ message MessageSubAgentRequest {
   // Set only by the relay, to the caller's authenticated subject; any
   // client-supplied value is ignored.
   string sender = 4;
+  string sender_name = 5;
 }
 
 message MessageSubAgentResponse {}
@@ -402,6 +413,7 @@ message CallToolRequest {
   // Set only by the relay, to the caller's authenticated subject; any
   // client-supplied value is ignored.
   string sender = 5;
+  string sender_name = 6;
 }
 
 message CallToolResponse {

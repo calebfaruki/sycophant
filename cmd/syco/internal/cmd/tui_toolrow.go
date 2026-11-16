@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+
+	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
 type toolState int
@@ -12,10 +14,23 @@ type toolState int
 const (
 	toolRunning toolState = iota
 	toolDone
-	// toolEnded: its turn failed or was cancelled before the call
-	// stopped; the client cannot tell how the call went.
-	toolEnded
+	toolFailed
+	toolStopped
 )
+
+// toolStateOf is the row state outcome gives, and false when outcome says
+// nothing of how the call went.
+func toolStateOf(outcome commonpb.ToolOutcome) (toolState, bool) {
+	switch outcome {
+	case commonpb.ToolOutcome_TOOL_OUTCOME_DONE:
+		return toolDone, true
+	case commonpb.ToolOutcome_TOOL_OUTCOME_FAILED:
+		return toolFailed, true
+	case commonpb.ToolOutcome_TOOL_OUTCOME_CANCELED:
+		return toolStopped, true
+	}
+	return toolRunning, false
+}
 
 type toolRow struct {
 	name  string
@@ -88,19 +103,21 @@ func oneLine(s string) string {
 }
 
 func (r *toolRow) render(width int) string {
-	head := "⚙ " + r.name
-	var tail string
+	head := "⚙ " + caretControls(r.name, "")
+	tail, tailStyle := " …", toolStyle
 	switch r.state {
-	case toolRunning:
-		tail = " …"
 	case toolDone:
-		tail = " ✓"
+		tail, tailStyle = " ✓", doneStyle
+	case toolFailed:
+		tail, tailStyle = " ×", errorStyle
+	case toolStopped:
+		tail, tailStyle = " stopped", statusStyle
 	}
 	line := toolStyle.Render(head)
 	if arg := toolArg(r.name, r.input.String()); arg != "" {
 		if room := width - ansi.StringWidth(head) - 2 - ansi.StringWidth(tail); room >= 2 {
-			line += "  " + statusStyle.Render(ansi.Truncate(arg, room, "…"))
+			line += "  " + statusStyle.Render(ansi.Truncate(caretControls(arg, ""), room, "…"))
 		}
 	}
-	return line + toolStyle.Render(tail)
+	return line + tailStyle.Render(tail)
 }

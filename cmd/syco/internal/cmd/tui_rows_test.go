@@ -35,7 +35,7 @@ func TestTUISentMessageIsAPanelWithNoLabel(t *testing.T) {
 		t.Fatalf("message panel has more than one padded row above or below:\n%s", strings.Join(lines, "\n"))
 	}
 	raw := d.rawLineWith("UserPanelHeron")
-	if !strings.Contains(raw, panelBar(panelAccent)) || !strings.Contains(raw, panelFill.Render(strings.Repeat(" ", panelPad))) {
+	if !strings.Contains(raw, panelBar(brandCyan)) || !strings.Contains(raw, panelFill.Render(strings.Repeat(" ", panelPad))) {
 		t.Fatalf("message row lacks the accent bar or the panel background:\n%q", raw)
 	}
 }
@@ -67,7 +67,12 @@ func TestTUISentMessageWrapsInsideItsPanelAtANarrowWidth(t *testing.T) {
 	}
 }
 
-func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) {
+// replyColumn is the text column of a reply line, past its bar.
+func replyColumn(line string) int {
+	return textColumn(strings.Replace(line, "┃", " ", 1))
+}
+
+func TestTUIReplyStartsInColumnThreeLiveAndCommitted(t *testing.T) {
 	const msgID = "msg-rows-reply"
 	_, d, s := tuiTurn(t, msgID)
 	d.update(tea.WindowSizeMsg{Width: 80, Height: 30})
@@ -80,7 +85,7 @@ func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) 
 		if at < 0 {
 			t.Fatalf("%s: reply not in the transcript:\n%s", when, strings.Join(lines, "\n"))
 		}
-		if col := textColumn(lines[at]); col != 3 {
+		if col := replyColumn(lines[at]); col != 3 {
 			t.Fatalf("%s: reply text starts in column %d, want 3: %q", when, col, lines[at])
 		}
 	}
@@ -92,7 +97,7 @@ func TestTUIReplyHasNoLabelAndStartsInColumnThreeLiveAndCommitted(t *testing.T) 
 	d.finishTurn(s, msgID)
 	check("committed")
 	lines := d.transcriptLines()
-	if at := rowIndex(lines, "ListItemKestrel"); at < 0 || textColumn(lines[at]) != 3 {
+	if at := rowIndex(lines, "ListItemKestrel"); at < 0 || replyColumn(lines[at]) != 3 {
 		t.Fatalf("list item is not in column 3:\n%s", strings.Join(lines, "\n"))
 	}
 }
@@ -117,6 +122,19 @@ func conversationBlocks(t *testing.T) (*tuiDriver, []string) {
 	d.send("UserBlocksRedstart")
 	d.startTurn(s, "msg-rows-blocks-2", "UserBlocksRedstart")
 	return d, live
+}
+
+func TestTUIShowsControlCharactersInAReplyAsCarets(t *testing.T) {
+	f, _ := newClientEnv(t)
+	f.setHistory(assistantEntry("ReplyEscPetrel \x1b[31mred"))
+	d := openTUI(t, f)
+	f.nextStream(t, 5*time.Second)
+	d.waitView("the reply", time.Now().Add(5*time.Second), func(string) bool {
+		return strings.Contains(d.transcript(), "ReplyEscPetrel")
+	})
+	if !strings.Contains(d.transcript(), "ReplyEscPetrel ^[[31mred") {
+		t.Fatalf("the reply does not show its ESC as ^[:\n%q", d.rawLineWith("ReplyEscPetrel"))
+	}
 }
 
 func TestTUIOnlyABarOrBlanksLeftOfColumnThree(t *testing.T) {
@@ -159,7 +177,7 @@ func TestTUIExactlyOneBlankLineBetweenBlocks(t *testing.T) {
 	}
 	// Each block's first line has one blank line above it, and the block
 	// before ends just above that.
-	reply := rowIndex(lines, "ReplyBlocksOriole")
+	reply := rowIndex(lines, "ReplyBlocksOriole") - 1 // its speaker line
 	read := rowIndex(lines, "⚙ Read")
 	search := rowIndex(lines, "⚙ Search")
 	fail := rowIndex(lines, "BlocksFailQuail")
@@ -210,10 +228,7 @@ func TestTUIHistoryDrawsTheTranscriptExactlyAsLive(t *testing.T) {
 		toolCallEntry("tool-2", "Shell", `{"command":"ls HistoryToolTwo"}`))
 	// Let the turn end's reload land first: the reconnect closes the
 	// connection it reads on.
-	d.waitMsg("the turn end's reload", 5*time.Second, func(msg tea.Msg) bool {
-		h, ok := msg.(historyMsg)
-		return ok && h.gen == d.model.(*tuiModel).reloadGen
-	})
+	d.waitReload("the turn end's reload")
 	d.dropAndReconnect(s)
 	if got := strings.Join(d.transcriptLines(), "\n"); got != live {
 		t.Fatalf("history draws:\n%s\nwant the live transcript:\n%s", got, live)
@@ -238,7 +253,7 @@ func TestTUIResizeRefitsReplies(t *testing.T) {
 		}
 	}
 	a, b := rowIndex(lines, "ResizeReplyOne"), rowIndex(lines, "ResizeReplyFour")
-	if a < 0 || b <= a || textColumn(lines[b]) != 3 {
+	if a < 0 || b <= a || replyColumn(lines[b]) != 3 {
 		t.Fatalf("reply did not re-wrap to the new width in column 3:\n%s", all)
 	}
 }

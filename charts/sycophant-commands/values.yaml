@@ -58,6 +58,7 @@
 #   subject: "https://dex.example.com/dex#alice"
 #   agents: []               # the agents the subject can reach
 #   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
+#   displayName: ""          # the name the chat shows for the subject; unset shows the subject
 
 # channel:
 #   name: tailnet

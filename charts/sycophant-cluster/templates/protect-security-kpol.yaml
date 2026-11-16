@@ -122,9 +122,9 @@ spec:
       message: >-
         Toolset ConfigMaps in a sycophant tenant namespace cannot be
         modified by callers inside the namespace.
-    # A relay-identity ConfigMap is one person's agent list and handle
-    # bindings — the data the relay answers ListAgents and handle
-    # resolution from. The operator (or the provision installer outside the
+    # A relay-identity ConfigMap is one person's agent list, display name
+    # and handle bindings — the data the relay answers ListAgents, the
+    # display name and handle resolution from. The operator (or the provision installer outside the
     # namespace) is its only writer; the relay is denied too, or a
     # compromised relay could rewrite any person's reach.
     - expression: >-

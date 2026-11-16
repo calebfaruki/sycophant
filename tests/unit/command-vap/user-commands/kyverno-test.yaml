@@ -33,3 +33,27 @@ results:
     result: fail
     resources:
       - tenant-acme/provision-user-4d5e6f7a84
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a85
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a86
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a87
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a88

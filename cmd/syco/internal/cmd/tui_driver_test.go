@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
@@ -111,6 +112,16 @@ func (d *tuiDriver) waitMsg(desc string, timeout time.Duration, match func(tea.M
 			d.t.Fatalf("timed out waiting for %s; view:\n%s", desc, d.view())
 		}
 	}
+}
+
+// waitReload feeds the model its messages until the reload for the current
+// turn has landed.
+func (d *tuiDriver) waitReload(desc string) {
+	d.t.Helper()
+	d.waitMsg(desc, 5*time.Second, func(msg tea.Msg) bool {
+		h, ok := msg.(historyMsg)
+		return ok && h.gen == d.model.(*tuiModel).reloadGen
+	})
 }
 
 func (d *tuiDriver) waitConnected() {
@@ -232,14 +243,14 @@ func (d *tuiDriver) finishTurn(s *fakeStream, msgID string) {
 	})
 }
 
-// startTurn starts the turn of message msgID and waits until the reload it
-// brings shows needle in the transcript.
+// startTurn starts the turn of message msgID and waits until it is working
+// and the reload it brings shows needle in the transcript.
 func (d *tuiDriver) startTurn(s *fakeStream, msgID, needle string) {
 	d.t.Helper()
 	s.push(turnStateFrame(msgID, commonpb.TurnState_TURN_STATE_WORKING))
-	d.waitView("the message sent at its turn start", time.Now().Add(5*time.Second), func(string) bool {
+	d.waitView("the message sent at its turn start", time.Now().Add(5*time.Second), func(v string) bool {
 		at := rowIndex(d.transcriptLines(), needle)
-		return at >= 0 && isPanelRow(d.transcriptLines()[at])
+		return strings.Contains(v, working) && at >= 0 && isPanelRow(d.transcriptLines()[at])
 	})
 }
 
@@ -380,6 +391,28 @@ func (d *tuiDriver) rawLineWith(s string) string {
 	return ""
 }
 
+// speakerAbove is the line right above the message panel that shows text,
+// trimmed, or "" when text shows on no panel row.
+func speakerAbove(lines []string, text string) string {
+	at := -1
+	for i, l := range lines {
+		if isPanelRow(strings.TrimLeft(l, " ")) && strings.Contains(l, text) {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return ""
+	}
+	for at > 0 && isPanelRow(strings.TrimLeft(lines[at-1], " ")) && panelText(lines[at-1]) == "" {
+		at--
+	}
+	if at == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[at-1])
+}
+
 // logoRows are the logo's rows without trailing blanks.
 func logoRows() []string {
 	rows := strings.Split(logo, "\n")
@@ -421,6 +454,14 @@ func barStarts(view string, c color.Color) bool {
 }
 
 const working = "working…"
+
+var brightGreenRe = regexp.MustCompile(`\x1b\[(?:[0-9];)*92[;m]`)
+
+var (
+	brandCyan  = lipgloss.Color("#12C8E6")
+	brandPink  = lipgloss.Color("#FF2E8F")
+	plainGreen = lipgloss.Color("2")
+)
 
 const placeholder = "Ask anything"
 

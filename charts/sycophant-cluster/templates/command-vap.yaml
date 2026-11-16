@@ -329,7 +329,7 @@ size(variables.target) <= 49`
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
   "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"
-  "keys" (list "user" "agents")
+  "keys" (list "user" "agents" "display-name")
   "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
   "keyHelp" "handle.<channel>"
   "targetRule" `has(object.data) && object.data.?user.orValue('') == variables.target`
@@ -356,7 +356,13 @@ size(variables.target) <= 49`
 - expression: >-
     !has(object.data) || object.data.all(k, !k.startsWith('handle.') ||
     (object.data[k] != '' && object.data[k].matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')))
-  message: "each handle value in a user command must be a non-empty platform user ID with no quote, backslash, or control character"` ) }}
+  message: "each handle value in a user command must be a non-empty platform user ID with no quote, backslash, or control character"
+# The display name reaches other people's terminals. Format characters,
+# such as bidi overrides, are refused too, as RFC 8266 does for nicknames.
+- expression: >-
+    !has(object.data) || !('display-name' in object.data) ||
+    object.data['display-name'].matches(r'^[^"\\\p{Cc}\p{Cf}\x{2028}\x{2029}]+$')
+  message: "a user command's 'display-name' must be non-empty with no quote, backslash, control character, format character, or line separator"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-user" "prefix" true
   "command" "reap-user" "noun" "reap-user" "action" "remove a user"
