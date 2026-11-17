@@ -1,0 +1,17 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-suspend-no-keepalive
+policies:
+  - ../policy.yaml
+resources:
+  - command.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+  - policy: command-suspend-tenant
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/suspend-tenant

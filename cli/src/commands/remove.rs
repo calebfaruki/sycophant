@@ -5,9 +5,8 @@ use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
 /// `sycoadm tenant remove <name>` — remove a tenant completely, including its
-/// PVCs and data. Irreversible. Suspends with a zero-day keepalive, so the
-/// cluster's reap deletes the namespace, its PVCs, Secrets, and releases on its
-/// next sweep.
+/// PVCs and data. Irreversible. Suspends with a zero-day keepalive, so Kyverno
+/// deletes the namespace, its PVCs, Secrets, and releases.
 pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let ns = scope.release_name()?;
     if !run_silent("kubectl", &["get", "namespace", &ns]) {
@@ -16,8 +15,8 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     }
 
     eprintln!("Removing tenant '{ns}' (workloads + data)...");
-    command::suspend(&Operator::login(&scope.oidc_dir())?, &ns, Some("0"))?;
-    wait_for("reap-after stamped on the tenant namespace", 120, || {
+    command::suspend(&Operator::login(&scope.oidc_dir())?, &ns, "0")?;
+    wait_for("cleanup label set on the tenant namespace", 120, || {
         run_output(
             "kubectl",
             &[
@@ -25,11 +24,11 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
                 "namespace",
                 &ns,
                 "-o",
-                "jsonpath={.metadata.annotations.sycophant\\.md/reap-after}",
+                "jsonpath={.metadata.labels.cleanup\\.kyverno\\.io/ttl}",
             ],
         )
         .is_ok_and(|a| !a.is_empty())
     })?;
-    ok(&format!("{ns} is deleted on the next reap sweep"));
+    ok(&format!("{ns} is marked for deletion"));
     Ok(())
 }

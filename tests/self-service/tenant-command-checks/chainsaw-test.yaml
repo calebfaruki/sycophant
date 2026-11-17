@@ -60,8 +60,7 @@ spec:
             content: |
               . ../lib.sh
               C=$(tenant_hash "$(user "alice-$TOKEN")" "c$TOKEN")
-              kubectl delete configmap "$C" -n sycophant-entitlements --ignore-not-found
-              kubectl delete configmap "provision-tenant-$C" -n sycophant-system --ignore-not-found
+              drop_tenant "$C"
     - name: entitlement-and-ownership-refusals
       try:
         - script:
@@ -110,10 +109,7 @@ spec:
               . ../lib.sh
               A=$(user "alice-$TOKEN")
               for n in "n$TOKEN" "w$TOKEN" "e$TOKEN"; do
-                t=$(tenant_hash "$A" "$n")
-                kubectl delete configmap "provision-tenant-$t" -n sycophant-system --ignore-not-found
-                kubectl delete configmap "$t" -n sycophant-entitlements --ignore-not-found
-                kubectl delete namespace "tenant-$t" --ignore-not-found --wait=false
+                drop_tenant "$(tenant_hash "$A" "$n")"
               done
     - name: a-suspended-tenant-refuses-the-operator
       try:
@@ -125,8 +121,8 @@ spec:
               . ../lib.sh
               A=$(user "alice-$TOKEN")
               S=$(tenant_hash "$A" "s$TOKEN")
-              # A future reap-after, so the reaper leaves the namespace alone.
-              tenant_ns "tenant-$S" "$A" "2099-01-01T00:00:00Z" | kubectl apply -f - >/dev/null
+              # A cleanup time far ahead, so Kyverno leaves the namespace alone.
+              tenant_ns "tenant-$S" "$A" "2099-01-01T000000Z" | kubectl apply -f - >/dev/null
               tenant_command "s$TOKEN" "$OPERATOR" "$S" | refused "a tenant command is refused while its tenant is suspended" \
                 "the operator's tenant command for a suspended tenant" as_admin "$OPERATOR" create -f -
       cleanup:
@@ -137,5 +133,4 @@ spec:
             content: |
               . ../lib.sh
               S=$(tenant_hash "$(user "alice-$TOKEN")" "s$TOKEN")
-              kubectl delete configmap "provision-tenant-$S" -n sycophant-system --ignore-not-found
-              kubectl delete namespace "tenant-$S" --ignore-not-found --wait=false
+              drop_tenant "$S"

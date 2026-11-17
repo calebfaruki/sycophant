@@ -30,7 +30,7 @@ provisioned namespace out of the reserved ones.
 {{- define "sycophant.channelProvisionCommandName" -}}provision-channel{{- end -}}
 {{- define "sycophant.instructionsProvisionCommandName" -}}provision-instructions{{- end -}}
 {{- define "sycophant.suspendCommandName" -}}suspend-tenant{{- end -}}
-{{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
+{{- define "sycophant.cleanupTtlLabel" -}}cleanup.kyverno.io/ttl{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
 {{- define "sycophant.targetAnnotation" -}}sycophant.md/target{{- end -}}
 {{- define "sycophant.ownerMarkerName" -}}provision-tenant-owner{{- end -}}
@@ -229,10 +229,6 @@ variables:
 {{- end }}
   - name: uid10
     expression: 'object.metadata.uid.replace("-", "").substring(0, 10)'
-  # Past the Job's activeDeadline, so the reap removes the identity only after
-  # the install has finished or timed out.
-  - name: reapAfter
-    expression: 'string(time.now() + duration("1800s"))'
 {{- end -}}
 
 {{- define "sycophant.projectedKubeApiToken.volume" -}}
@@ -276,8 +272,7 @@ metadata:
   labels:
     {{- include "sycophant.labels" $ctx | nindent 4 }}
     app.kubernetes.io/component: {{ .name }}
-  annotations:
-    {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
+    {{ include "sycophant.cleanupTtlLabel" $ctx }}: 30m
 ---
 apiVersion: batch/v1
 kind: Job
@@ -543,8 +538,7 @@ spec:
             labels:
               {{- include "sycophant.labels" $ctx | nindent 14 }}
               app.kubernetes.io/component: {{ $component }}
-            annotations:
-              {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
+              {{ include "sycophant.cleanupTtlLabel" $ctx }}: 30m
           rules:
             - apiGroups: [""]
               resources: ["configmaps"]
@@ -566,8 +560,7 @@ metadata:
   labels:
     {{- include "sycophant.labels" .ctx | nindent 4 }}
     app.kubernetes.io/component: {{ .name }}
-  annotations:
-    {{ include "sycophant.reapAfterAnnotation" .ctx }}: (( variables.reapAfter ))
+    {{ include "sycophant.cleanupTtlLabel" .ctx }}: 30m
 subjects:
   - kind: ServiceAccount
     name: (( "{{ .name }}-" + variables.uid10 ))
@@ -600,8 +593,7 @@ sycophant-system. The RoleBinding of the same name binds them to the kind's
 ClusterRole in the reap command's namespace. The Job reads the target from the
 reap command, runs its kind's script, then deletes the reap command. A failed
 run exits first and leaves the command in place. The ServiceAccount and
-RoleBinding carry component `uninstall-<kind>` and the reap-after annotation,
-so `reap-<kind>` sweeps them.
+RoleBinding carry the cleanup label, so Kyverno deletes them.
 */ -}}
 {{- define "sycophant.provisionUninstaller" -}}
 {{- $ctx := .ctx -}}
@@ -629,45 +621,4 @@ spec:
           {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $name "script" $script) | nindent 10 }}
           ---
           {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $name "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" $role) | nindent 10 }}
-{{- end -}}
-
-{{/*
-Reaps each install and uninstall ServiceAccount and RoleBinding once its
-reap-after instant passes, so no apply-capable credential persists between runs.
-Each Job self-cleans on its own ttlSecondsAfterFinished.
-*/}}
-{{- define "sycophant.provisionReap" -}}
-{{- $ctx := .ctx -}}
-{{- $kind := .kind -}}
-apiVersion: policies.kyverno.io/v1
-kind: DeletingPolicy
-metadata:
-  name: reap-{{ $kind }}
-  labels:
-    {{- include "sycophant.labels" $ctx | nindent 4 }}
-spec:
-  schedule: {{ $ctx.Values.reap.schedule | quote }}
-  matchConstraints:
-    objectSelector:
-      matchExpressions:
-        - key: app.kubernetes.io/component
-          operator: In
-          values: [provision-{{ $kind }}, uninstall-{{ $kind }}]
-    resourceRules:
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["serviceaccounts"]
-      - apiGroups: ["rbac.authorization.k8s.io"]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["rolebindings"]
-  variables:
-    - name: reapAfter
-      expression: >-
-        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" $ctx }}"].orValue("")
-  conditions:
-    - name: reap-after-ttl-has-passed
-      expression: >-
-        variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()
 {{- end -}}

@@ -13,8 +13,7 @@ spec:
           - name: NAME
             value: (concat('command-writer-', $test.metadata.name))
         content: |
-          set -euo pipefail
-          ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+          . ../../../self-service/lib.sh
           kubectl create role "$NAME" -n "$COMMAND_NS" --verb=create --resource=configmaps
           kubectl create rolebinding "$NAME" -n "$COMMAND_NS" --role="$NAME" --user="${ISSUER}#operator"
   cleanup:

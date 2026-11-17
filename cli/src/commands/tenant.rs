@@ -8,7 +8,7 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
         TenantSub::Up(c) => up::run(&c.values),
         TenantSub::Down(c) => down::run(
             &Scope::for_tenant(&find_tenant_ns(&c.name, None)?)?,
-            c.keepalive.as_deref(),
+            &c.keepalive,
         ),
         TenantSub::Remove(c) => remove::run(&Scope::for_tenant(&find_tenant_ns(&c.name, None)?)?),
         TenantSub::Secret(c) => secret::run(c),

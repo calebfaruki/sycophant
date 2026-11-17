@@ -87,7 +87,7 @@ spec:
       message: "{{ $a }} {{ .noun }} command is admitted only for the tenant owner recorded in the namespace's sycophant.md/owner annotation"
     {{- if include "sycophant.selfService" $ctx }}
     - expression: >-
-        namespaceObject.metadata.?annotations['{{ include "sycophant.reapAfterAnnotation" $ctx }}'].orValue('') == ''
+        namespaceObject.metadata.?labels['{{ include "sycophant.cleanupTtlLabel" $ctx }}'].orValue('') == ''
       message: "{{ $a }} {{ .noun }} command is refused while its tenant is suspended"
     {{- end }}
     {{- end }}
@@ -516,12 +516,11 @@ size(variables.target) <= 50`
 size(variables.target) <= 50`
   "targetHelp" "a reap-channel command's sycophant.md/target must be a DNS-safe name of at most 50 characters" ) }}
 ---
-{{- /* An absent keepalive suspends with no reap; a typo'd one is refused rather than suspending forever. */}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-suspend-tenant"
   "command" (include "sycophant.suspendCommandName" .) "noun" "suspend" "action" "suspend a tenant"
   "keys" (list "keepalive")
   "shape" `
 - expression: >-
-    !has(object.data) || !('keepalive' in object.data) ||
+    has(object.data) && 'keepalive' in object.data &&
     object.data['keepalive'] in ['0', '30', '60', '90']
-  message: "a suspend command's 'keepalive', when set, must be one of 0, 30, 60, 90"` ) }}
+  message: "a suspend command must carry a 'keepalive' of one of 0, 30, 60, 90"` ) }}

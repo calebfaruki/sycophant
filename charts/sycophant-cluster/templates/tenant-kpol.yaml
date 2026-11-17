@@ -1,6 +1,6 @@
 {{- /*
-The tenant lifecycle: provision (Namespace, quota, installer and its grant),
-suspend, and the reap.
+The tenant lifecycle: provision (Namespace, quota, installer and its grant)
+and suspend.
 */}}
 {{- /*
 Fires only on suspend commands inside a tenant namespace. Without the
@@ -67,6 +67,7 @@ spec:
           kind: Namespace
           metadata:
             name: (( variables.tenant ))
+            finalizers: ["sycophant.md/tenant-data"]
             annotations:
               sycophant.md/owner: (( variables.owner ))
               {{ include "sycophant.targetAnnotation" . }}: (( variables.target ))
@@ -107,60 +108,8 @@ spec:
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "tenant") }}
 ---
-# Delete reactor. Each object dies on its own reap-after annotation.
-# TODO: with the setting off, a tenant's instruction folders survive the reap
-# and a new tenant with the same name reads them. With it on, reap-tenant-files
-# deletes them first.
-apiVersion: policies.kyverno.io/v1
-kind: DeletingPolicy
-metadata:
-  name: reap-tenant
-  labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
-spec:
-  schedule: {{ .Values.reap.schedule | quote }}
-  matchConstraints:
-    resourceRules:
-      {{- if not (include "sycophant.selfService" .) }}
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["namespaces"]
-      {{- end }}
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["serviceaccounts"]
-      - apiGroups: ["rbac.authorization.k8s.io"]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["rolebindings"]
-      - apiGroups: ["rbac.authorization.k8s.io"]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["roles"]
-  variables:
-    # The reap-after annotation the suspend reactor stamps on the namespace (now
-    # plus keepalive) and the provision generator stamps on the installer's
-    # objects. Only an object carrying it is a candidate.
-    - name: reapAfter
-      expression: >-
-        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
-  conditions:
-    # One objectSelector cannot select the namespace by part-of and the
-    # installer objects by component at once, so the label gate branches on
-    # kind here.
-    - name: selector-matches-by-kind
-      expression: >-
-        object.kind == "Namespace"
-          ? object.metadata.?labels["app.kubernetes.io/part-of"].orValue("") == "sycophant-tenant"
-          : object.metadata.?labels["app.kubernetes.io/component"].orValue("") == "provision-tenant"
-    - name: reap-after-ttl-has-passed
-      expression: >-
-        variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()
----
 # Suspend scales the tenant namespace's Deployments to zero. A second policy
-# stamps reap-after on the namespace. Two policies because a CEL mutating
+# sets the cleanup label on the namespace. Two policies because a CEL mutating
 # policy resolves one set of targets. Gates are target match conditions,
 # because as trigger conditions they would move the policy into Kyverno's
 # per-policy webhook and admit the suspend command twice. Targets resolve off
@@ -203,10 +152,11 @@ spec:
     skipBackgroundRequests: false
   {{- include "sycophant.suspendCommandMatch" . | nindent 2 }}
   variables:
-    # Keepalive is in days; the annotation is an absolute RFC3339 instant.
-    - name: reapAfter
+    # Keepalive is in days. The label is a whole-second UTC time in Kyverno's
+    # label-safe layout 2006-01-02T150405Z.
+    - name: ttl
       expression: >-
-        string(time.now() + duration(string(int(request.object.data["keepalive"]) * 24) + "h"))
+        string(timestamp(int(time.now()) + int(request.object.data["keepalive"]) * 86400)).replace(":", "")
   targetMatchConstraints:
     expression: >-
       resource.get("v1", "namespaces", "", object.metadata.namespace)
@@ -215,9 +165,9 @@ spec:
       expression: >-
         request.object.?data["keepalive"].orValue("") != ""
     {{- if include "sycophant.selfService" . }}
-    - name: reap-after-is-set-once
+    - name: cleanup-label-is-set-once
       expression: >-
-        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("") == ""
+        object.metadata.?labels["{{ include "sycophant.cleanupTtlLabel" . }}"].orValue("") == ""
     {{- end }}
   mutations:
     - patchType: ApplyConfiguration
@@ -225,7 +175,7 @@ spec:
         expression: >-
           Object{
             metadata: Object.metadata{
-              annotations: {"{{ include "sycophant.reapAfterAnnotation" . }}": variables.reapAfter}
+              labels: {"{{ include "sycophant.cleanupTtlLabel" . }}": variables.ttl}
             }
           }
 {{- end }}

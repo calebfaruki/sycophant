@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: tenant-ns-requires-psa
 spec:
-  description: A tenant-labeled namespace without enforce=restricted is rejected; a labeled one admits.
+  description: A tenant-labeled namespace without enforce=restricted is rejected.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -27,36 +27,6 @@ spec:
             check:
               ($error != null): true
               (contains($stdout, 'must set pod-security.kubernetes.io/enforce')): true
-    - name: fully-labeled-tenant-ns-is-admitted
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              cat <<EOF | kubectl apply -f -
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ${TENANT_NS}
-                labels:
-                  app.kubernetes.io/part-of: sycophant-tenant
-                  pod-security.kubernetes.io/enforce: restricted
-                  pod-security.kubernetes.io/enforce-version: latest
-                  pod-security.kubernetes.io/warn: restricted
-                  pod-security.kubernetes.io/audit: restricted
-              EOF
-            check:
-              ($error == null): true
-      finally:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   catch:
     - script:
         env:

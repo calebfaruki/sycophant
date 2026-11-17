@@ -32,7 +32,6 @@ rules:
       - "validatingpolicies"
       - "mutatingpolicies"
       - "generatingpolicies"
-      - "deletingpolicies"
     verbs: ["*"]
   # VAP verbs are the legitimate edit path for the agent admission
   # rule; chainsaw asserts only this ClusterRole + cluster-admin hold

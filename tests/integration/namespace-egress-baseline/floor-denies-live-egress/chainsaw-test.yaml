@@ -62,19 +62,9 @@ spec:
               set -euo pipefail
               # Poll for the Cilium-set Valid condition. A rejected floor
               # (egress: []) stays Valid=False and enforces nothing.
-              status=""
-              for i in $(seq 1 15); do
-                status=$(kubectl get ciliumnetworkpolicy default-deny-egress -n "$TENANT_NS" \
-                  -o jsonpath="{.status.conditions[?(@.type=='Valid')].status}" 2>/dev/null || true)
-                [ -n "$status" ] && break
-                sleep 2
-              done
-              if [ "$status" != "True" ]; then
-                msg=$(kubectl get ciliumnetworkpolicy default-deny-egress -n "$TENANT_NS" \
-                  -o jsonpath="{.status.conditions[?(@.type=='Valid')].message}" 2>/dev/null || true)
-                echo "default-deny-egress is not accepted by Cilium (Valid=[$status]): $msg; the floor is inert and enforces nothing"
-                exit 1
-              fi
+              kubectl wait -n "$TENANT_NS" \
+                --for=jsonpath='{.status.conditions[?(@.type=="Valid")].status}'=True \
+                ciliumnetworkpolicy/default-deny-egress --timeout=30s
     - name: uncovered-pod-egress-is-denied
       try:
         - script:

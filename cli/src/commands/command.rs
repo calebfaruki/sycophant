@@ -442,16 +442,15 @@ pub(crate) fn user_down(subject: &str, tenant: &str) -> Result<(), String> {
     reap(&op, "user", "subject", subject, tenant)
 }
 
-/// Write the suspend command into tenant namespace `ns`. Without a keepalive the
-/// tenant scales to zero and stays; with one the reap deletes it that many days on.
-pub(crate) fn suspend(op: &Operator, ns: &str, keepalive: Option<&str>) -> Result<(), String> {
+/// Write the suspend command into tenant namespace `ns`. The tenant scales to
+/// zero and the cluster deletes it `keepalive` days on.
+pub(crate) fn suspend(op: &Operator, ns: &str, keepalive: &str) -> Result<(), String> {
     let name = format!("tenant.hash={}", tenant_token(ns)?);
-    let keep = keepalive.map(|k| format!("tenant.keepalive={k}"));
-    let mut args = vec!["--set-string", &name];
-    if let Some(k) = &keep {
-        args.extend(["--set-string", k]);
-    }
-    let manifest = render("tenant-suspend", &args)?;
+    let keep = format!("tenant.keepalive={keepalive}");
+    let manifest = render(
+        "tenant-suspend",
+        &["--set-string", &name, "--set-string", &keep],
+    )?;
     let kube = op.kubeconfig()?;
     operator::grant_command_writer(ns, COMMAND_WRITER_VERBS, &kube.identity)?;
     write(&kube, &manifest)?;

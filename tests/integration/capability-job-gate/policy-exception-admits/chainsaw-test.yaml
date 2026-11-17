@@ -11,10 +11,12 @@ spec:
       value: sycophant-system
   steps:
     - name: create-tenant-ns
-      try:
-        - apply:
-            file: ../../fixtures/tenant-namespace.yaml
-            template: true
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: ensure-operator-ns
       try:
         # Guard, not a chainsaw-owned apply: sycophant-system is a shared
@@ -42,23 +44,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: polex-control
-              spec:
-                template:
-                  metadata:
-                    labels:
-                      sycophant.md/job-kind: tool
-                  spec:
-                    restartPolicy: Never
-                    serviceAccountName: attacker-sa
-                    containers:
-                      - name: probe
-                        image: registry.k8s.io/pause:3.9
-              MANIFEST
+              sed "s/NAME/polex-control/" job.yaml | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
             check:
               ($error != null): true
               (contains($stderr, 'cluster-capability-job-gate')): true
@@ -93,23 +79,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: polex-exempted
-              spec:
-                template:
-                  metadata:
-                    labels:
-                      sycophant.md/job-kind: tool
-                  spec:
-                    restartPolicy: Never
-                    serviceAccountName: attacker-sa
-                    containers:
-                      - name: probe
-                        image: registry.k8s.io/pause:3.9
-              MANIFEST
+              sed "s/NAME/polex-exempted/" job.yaml | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
             check:
               ($error == null): true
       catch:
@@ -142,23 +112,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: polex-tenant-residence
-              spec:
-                template:
-                  metadata:
-                    labels:
-                      sycophant.md/job-kind: tool
-                  spec:
-                    restartPolicy: Never
-                    serviceAccountName: attacker-sa
-                    containers:
-                      - name: probe
-                        image: registry.k8s.io/pause:3.9
-              MANIFEST
+              sed "s/NAME/polex-tenant-residence/" job.yaml | kubectl create --as="system:serviceaccount:${TENANT_NS}:ag-probe" -n "$TENANT_NS" -f -
             check:
               ($error != null): true
               (contains($stderr, 'cluster-capability-job-gate')): true
@@ -171,10 +125,3 @@ spec:
               set -euo pipefail
               kubectl delete policyexception.policies.kyverno.io allow-capability-job-shape \
                 -n "$OPERATOR_NS" --ignore-not-found
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -250,15 +250,6 @@ def refused(job):
     r = job["spec"]["podFailurePolicy"]["rules"][0]
     return r["onExitCodes"]["values"][0] if r["action"] == "FailJob" else None
 
-def selects(selector, labels):
-    if (any(labels.get(k) != v
-            for k, v in (selector.get("matchLabels") or {}).items())):
-        return False
-    return all(
-        e["operator"] == "In" and labels.get(e["key"]) in e["values"]
-        for e in selector.get("matchExpressions") or []
-    )
-
 def policy(kind, k8s_kind, name):
     return next((
         d for d in yaml.safe_load_all(open(os.path.join(
@@ -268,14 +259,10 @@ def policy(kind, k8s_kind, name):
         if d and d.get("kind") == k8s_kind and d["metadata"]["name"] == name
     ), None)
 
-def reaps(pol, docs):
-    selector = pol["spec"]["matchConstraints"]["objectSelector"]
-    expr = next(v["expression"] for v in pol["spec"]["variables"]
-                if v["name"] == "reapAfter")
-    annotation = re.search(r'annotations\["([^"]+)"\]', expr).group(1)
+def lacks_cleanup_label(docs):
     return [f"{d['kind']}/{d['metadata']['name']}" for d in docs
-            if not selects(selector, d["metadata"].get("labels") or {})
-            or not (d["metadata"].get("annotations") or {}).get(annotation)]
+            if (d["metadata"].get("labels") or {})
+            .get("cleanup.kyverno.io/ttl") != "30m"]
 
 def in_ns(argv, ns):
     return f"--namespace={ns}" in argv or any(
@@ -323,10 +310,10 @@ for kind in ("tenant", "agent"):
           else f"roleRef {rb['roleRef']}")
 
     if kind != "tenant":
-        reap = policy(kind, "DeletingPolicy", f"reap-{kind}")
-        miss = reaps(reap, (sa, rb)) if reap else ["no DeletingPolicy"]
-        check(f"reap-{kind} selects this install SA and RoleBinding",
-              None if not miss else f"not reaped: {miss}")
+        miss = lacks_cleanup_label((sa, rb))
+        check(f"{kind}: install ServiceAccount and RoleBinding carry "
+              "cleanup.kyverno.io/ttl 30m",
+              None if not miss else f"no 30m cleanup label: {miss}")
 
     rc, calls = run_job(job, 0)
     helm_at = upgrades(calls)
@@ -423,6 +410,11 @@ check(name, None if var.get("tenant") == '"tenant-" + object.data["tenant"]'
           '.orValue("")')
       else f"tenant var={var.get('tenant')!r}, "
       f"target var={var.get('target')!r}, Namespace template={ns_tmpl!r}")
+check("tenant: the generated Namespace carries the sycophant.md/tenant-data "
+      "finalizer",
+      None if (ns_tmpl or {}).get("metadata", {}).get("finalizers")
+      == ["sycophant.md/tenant-data"]
+      else f"Namespace template={ns_tmpl!r}")
 
 rb = find(docs, "RoleBinding", obj, "sycophant-system")
 check("tenant: install ServiceAccount bound to its own command-delete Role",
@@ -444,25 +436,18 @@ check("tenant: the install's Role may delete only its own tenant command",
       ]
       else f"got {role}")
 
-reap_t = policy("tenant", "DeletingPolicy", "reap-tenant")
-t_sa = find(docs, "ServiceAccount", obj, "sycophant-system")
+parts = [find(docs, k, obj, ns) for k, ns in (
+    ("ServiceAccount", "sycophant-system"), ("Role", "sycophant-system"),
+    ("RoleBinding", "sycophant-system"),
+    ("RoleBinding", cases["tenant"]["ns"]))]
 name = (
-    "tenant: the scheduled sweep selects the install ServiceAccount, Role "
-    "and RoleBinding")
-if not (reap_t and t_sa):
-    bad(name, "missing reap-tenant DeletingPolicy or install ServiceAccount")
+    "tenant: the install ServiceAccount, Role and both RoleBindings carry "
+    "cleanup.kyverno.io/ttl 30m")
+if not all(parts):
+    bad(name, f"missing an install part; generated {listing(docs)}")
 else:
-    cond = next(c["expression"] for c in reap_t["spec"]["conditions"]
-                if c["name"] == "selector-matches-by-kind")
-    kinds = {
-        r for rule in reap_t["spec"]["matchConstraints"]["resourceRules"]
-        for r in rule["resources"]
-    }
-    component = t_sa["metadata"]["labels"]["app.kubernetes.io/component"]
-    check(name, None if f'"{component}"' in cond
-          and {"namespaces", "serviceaccounts", "rolebindings", "roles"}
-          <= kinds
-          else f"component label not in selector or kinds {kinds}")
+    miss = lacks_cleanup_label(parts)
+    check(name, None if not miss else f"no 30m cleanup label: {miss}")
 
 def install_call(kind, get_cm="{}"):
     job = find(
@@ -625,17 +610,14 @@ else:
     bad(cascade, "no uninstall Job")
     bad(stops, "no uninstall Job")
 
-reap = policy(kind, "DeletingPolicy", f"reap-{kind}")
-name = f"{kind}: the scheduled sweep selects the uninstall identity"
-if not (reap and sa and rb):
-    bad(name, f"missing reap-{kind} DeletingPolicy or uninstall identity")
+name = (
+    f"{kind}: uninstall ServiceAccount and RoleBinding carry "
+    "cleanup.kyverno.io/ttl 30m")
+if not (sa and rb):
+    bad(name, "missing uninstall identity")
 else:
-    miss = [f"{d['kind']}/{d['metadata']['name']}" for d in (sa, rb)
-            if (d["metadata"].get("labels") or {})
-            .get("app.kubernetes.io/component") != f"uninstall-{kind}"]
-    miss += reaps(reap, (sa, rb))
-    check(name, None if not miss
-          else f"{miss} not labelled uninstall-{kind} or not reaped")
+    miss = lacks_cleanup_label((sa, rb))
+    check(name, None if not miss else f"no 30m cleanup label: {miss}")
 
 def archive_of(members):
     buf = io.BytesIO()

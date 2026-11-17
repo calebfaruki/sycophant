@@ -84,18 +84,15 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
-              for i in $(seq 1 120); do
-                kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 && \
-                  kubectl get rolebinding "user-ag-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 && \
-                  kubectl get configmap "user-$HASH" -n "$TENANT_NS" >/dev/null 2>&1 && exit 0
-                sleep 2
-              done
-              echo "user release did not render within 240s" >&2
-              kubectl get rolebindings,configmaps -n "$TENANT_NS" >&2 || true
-              exit 1
+              . ../../../self-service/lib.sh
+              HASH=$(hex10 "$(user alice)")
+              kubectl wait --for=create "rolebinding/user-ag-$HASH-alpha" -n "$TENANT_NS" --timeout=240s >/dev/null &&
+                kubectl wait --for=create "rolebinding/user-ag-$HASH-beta" -n "$TENANT_NS" --timeout=240s >/dev/null &&
+                kubectl wait --for=create "configmap/user-$HASH" -n "$TENANT_NS" --timeout=240s >/dev/null || {
+                echo "user release did not render within 240s" >&2
+                kubectl get rolebindings,configmaps -n "$TENANT_NS" >&2 || true
+                exit 1
+              }
     - name: assert-reach-rolebindings-and-identity-configmap
       try:
         - script:
@@ -104,10 +101,9 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              . ../../../self-service/lib.sh
+              ALICE=$(user alice)
+              HASH=$(hex10 "$ALICE")
               # One reach RoleBinding per listed agent, binding the raw
               # subject to that agent's reach Role.
               for agent in alpha beta; do
@@ -140,9 +136,8 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
+              . ../../../self-service/lib.sh
+              ALICE=$(user alice)
               for agent in alpha beta; do
                 [ "$(kubectl auth can-i get service/ag-$agent -n "$TENANT_NS" --as="$ALICE")" = yes ] \
                   || { echo "alice cannot reach listed ag-$agent"; exit 1; }
@@ -184,18 +179,13 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              . ../../../self-service/lib.sh
+              ALICE=$(user alice)
+              HASH=$(hex10 "$ALICE")
               # The rewrite replaces the release's objects: beta's binding
               # goes rather than stacking beside the new set.
-              for i in $(seq 1 120); do
-                kubectl get rolebinding "user-ag-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 || break
-                sleep 2
-              done
-              kubectl get rolebinding "user-ag-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 \
-                && { echo "beta reach RoleBinding survived rewrite without it"; exit 1; }
+              kubectl wait --for=delete "rolebinding/user-ag-$HASH-beta" -n "$TENANT_NS" --timeout=240s >/dev/null \
+                || { echo "beta reach RoleBinding survived rewrite without it"; exit 1; }
               [ "$(kubectl auth can-i get service/ag-beta -n "$TENANT_NS" --as="$ALICE")" = no ] \
                 || { echo "beta still reachable after rewrite"; exit 1; }
               true
@@ -225,9 +215,8 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              . ../../../self-service/lib.sh
+              HASH=$(hex10 "$(user alice)")
               for i in $(seq 1 120); do
                 [ -z "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" \
                   -o jsonpath='{.data.handle\.slack}' 2>/dev/null)" ] && break
@@ -248,18 +237,13 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
+              . ../../../self-service/lib.sh
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              ALICE=$(user alice)
+              HASH=$(hex10 "$ALICE")
               kubectl delete role ag-alpha-reach -n "$TENANT_NS" --wait=true >/dev/null
-              for i in $(seq 1 60); do
-                kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 || break
-                sleep 2
-              done
-              kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 \
-                && { echo "alpha's reach RoleBinding outlived its Role"; exit 1; }
+              kubectl wait --for=delete "rolebinding/user-ag-$HASH-alpha" -n "$TENANT_NS" --timeout=120s >/dev/null \
+                || { echo "alpha's reach RoleBinding outlived its Role"; exit 1; }
               helm template ag-alpha "$REPO_ROOT/charts/sycophant-agent" \
                 --set name=alpha -n "$TENANT_NS" \
                 --show-only templates/reach-rbac.yaml \
@@ -294,18 +278,12 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              . ../../../self-service/lib.sh
+              ALICE=$(user alice)
+              HASH=$(hex10 "$ALICE")
               ROLE_UID=$(kubectl get role ag-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
-              for i in $(seq 1 120); do
-                [ "$(kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" \
-                  -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ROLE_UID" ] && break
-                sleep 2
-              done
-              [ "$(kubectl get rolebinding "user-ag-$HASH-alpha" -n "$TENANT_NS" \
-                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ROLE_UID" ] \
+              kubectl wait --for=create --for=jsonpath='{.metadata.ownerReferences[0].uid}'="$ROLE_UID" \
+                "rolebinding/user-ag-$HASH-alpha" -n "$TENANT_NS" --timeout=240s >/dev/null \
                 || { echo "the rewrite did not bind the recreated ag-alpha-reach"; exit 1; }
               [ "$(kubectl auth can-i get service/ag-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
                 || { echo "alice cannot reach ag-alpha after the rewrite"; exit 1; }
@@ -339,11 +317,10 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
+              . ../../../self-service/lib.sh
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              ALICE=$(user alice)
+              HASH=$(hex10 "$ALICE")
               ALPHA_UID=$(kubectl get role ag-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
               MISSING=delta
               # The installer's first attempt must fail before ag-delta
@@ -415,10 +392,9 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              . ../../../self-service/lib.sh
               for sub in alice mallory; do
-                HASH=$(printf '%s' "${ISSUER}#${sub}" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+                HASH=$(hex10 "$(user "$sub")")
                 kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found
               done
               true

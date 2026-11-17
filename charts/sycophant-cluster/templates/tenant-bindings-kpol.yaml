@@ -25,7 +25,7 @@
 # its own background requests unless `skipBackgroundRequests` is off, so it is
 # off here or a tenant from a provision command gets none of its bindings. The
 # background controller labels no namespace but the reactor's; the suspend reactor's
-# reap-after stamp re-fires this policy onto the same bindings.
+# cleanup label re-fires this policy onto the same bindings.
 #
 # The generated bindings carry no `namespace`, which is how a template declares
 # a cluster-scoped resource.

@@ -78,10 +78,7 @@ spec:
             content: |
               . ../lib.sh
               for who in alice bob; do
-                t=$(tenant_hash "$(user "$who-$TOKEN")" "Team $TOKEN")
-                kubectl delete configmap "provision-tenant-$t" -n sycophant-system --ignore-not-found
-                kubectl delete configmap "$t" -n sycophant-entitlements --ignore-not-found
-                kubectl delete namespace "tenant-$t" --ignore-not-found --wait=false
+                drop_tenant "$(tenant_hash "$(user "$who-$TOKEN")" "Team $TOKEN")"
               done
     - name: the-owner-grant
       try:

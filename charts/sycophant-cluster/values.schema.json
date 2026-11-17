@@ -60,7 +60,7 @@
         "schedule": {
           "type": "string",
           "minLength": 1,
-          "description": "Cron schedule for the tenant reap. Standard 5-field cron; Kyverno's minimum granularity is 1 minute."
+          "description": "Cron schedule for the tenant file cleaner. Standard 5-field cron."
         }
       }
     }

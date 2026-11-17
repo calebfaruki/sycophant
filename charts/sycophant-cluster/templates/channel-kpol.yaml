@@ -1,13 +1,10 @@
 {{- /*
 The channel lifecycle: the provision-channel installer and its grant, the
-uninstall-channel reactor on a reap command, and the reap of both identities'
-ServiceAccounts and RoleBindings.
+uninstall-channel reactor on a reap command.
 */}}
 {{- if include "sycophant.renderKyverno" . }}
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "channel") }}
 ---
 {{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "channel") }}
----
-{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "channel") }}
 {{- end }}

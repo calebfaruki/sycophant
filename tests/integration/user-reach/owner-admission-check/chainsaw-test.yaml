@@ -21,10 +21,8 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              OWNER="${ISSUER}#operator"
-              OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
+              . ../../../self-service/lib.sh
+              OWNER=$(user operator)
               cat <<EOF | kubectl apply -f -
               apiVersion: v1
               kind: Namespace
@@ -36,7 +34,7 @@ spec:
                   pod-security.kubernetes.io/enforce-version: latest
                   pod-security.kubernetes.io/warn: restricted
                   pod-security.kubernetes.io/audit: restricted
-                  sycophant.md/owner: "$OWNER_HASH"
+                  sycophant.md/owner: "$(owner_hash "$OWNER")"
                 annotations:
                   sycophant.md/owner: "$OWNER"
               EOF
@@ -76,16 +74,10 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              kubectl create configmap provision-agent-4b234aca7b -n "$TENANT_NS" \
-                --from-literal=toolsets=stdlib --from-literal=model=a \
-                --dry-run=client -o yaml \
-                | kubectl label --local -f - -o yaml \
-                    app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-                | kubectl annotate --local -f - -o yaml sycophant.md/target=ownertest \
-                | kubectl create --as="${ISSUER}#operator" -f - >/dev/null
-              kubectl delete configmap provision-agent-4b234aca7b -n "$TENANT_NS" --ignore-not-found >/dev/null
+              . ../../../self-service/lib.sh
+              labelled_command provision-agent ownertest toolsets=stdlib model=a \
+                | kubectl create -n "$TENANT_NS" --as="$(user operator)" -f - >/dev/null
+              kubectl delete configmap "provision-agent-$(hex10 ownertest)" -n "$TENANT_NS" --ignore-not-found >/dev/null
               true
     - name: nonowner-denied-agent-and-instructions-commands
       try:
@@ -95,19 +87,14 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -euo pipefail
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              for args in "provision-agent-05382116af --from-literal=toolsets=stdlib --from-literal=model=a" "provision-instructions-05382116af --from-literal=archive=eA==" "reap-instructions-05382116af"; do
-                err=$(kubectl create configmap $args -n "$TENANT_NS" \
-                  --dry-run=client -o yaml \
-                  | kubectl label --local -f - -o yaml \
-                      app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-                  | kubectl annotate --local -f - -o yaml sycophant.md/target=mallorytest \
-                  | kubectl create --as="${ISSUER}#mallory" -f - 2>&1 >/dev/null) && {
-                  echo "non-owner mallory was admitted: ${args%% *}"; exit 1; }
-                case "$err" in
-                  *"tenant owner"*) ;;
-                  *) echo "${args%% *} denied, but not by the owner check: $err"; exit 1 ;;
-                esac
-              done
+              . ../../../self-service/lib.sh
+              labelled_command provision-agent mallorytest toolsets=stdlib model=a \
+                | refused "tenant owner" "non-owner mallory's provision-agent command" \
+                    kubectl create -n "$TENANT_NS" --as="$(user mallory)" -f -
+              labelled_command provision-instructions mallorytest archive=eA== \
+                | refused "tenant owner" "non-owner mallory's provision-instructions command" \
+                    kubectl create -n "$TENANT_NS" --as="$(user mallory)" -f -
+              labelled_command reap-instructions mallorytest \
+                | refused "tenant owner" "non-owner mallory's reap-instructions command" \
+                    kubectl create -n "$TENANT_NS" --as="$(user mallory)" -f -
               true

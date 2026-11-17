@@ -179,29 +179,6 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
             .all(|(resource, name)| policy_ready(resource, name)),
         "Kyverno policies not Ready \u{2014} check `kubectl get vpol,mpol,gpol`",
     );
-    // The cleanup controller never writes `conditionStatus.ready` on a
-    // DeletingPolicy, so the reap policies are checked for presence. The
-    // admission webhook compiles a policy on apply, so one that exists built.
-    require(
-        &mut cluster_fails,
-        "Kyverno scheduled policies present",
-        [
-            "reap-tenant",
-            "reap-agent",
-            "reap-user",
-            "reap-toolset",
-            "reap-inference",
-            "reap-channel",
-        ]
-        .iter()
-        .all(|name| {
-            run_silent(
-                "kubectl",
-                &["get", "deletingpolicies.policies.kyverno.io", name],
-            )
-        }),
-        "reap policy missing \u{2014} check `kubectl get dpol`",
-    );
     // No-downgrade guard: `sycoadm upgrade` applies the charts bundled in THIS
     // binary, so a sycoadm older than the cluster would roll the platform back.
     // (The release-present check above covers a missing release, so skew is only
@@ -336,10 +313,10 @@ fn require(fails: &mut Vec<String>, label: &str, present: bool, detail: &str) {
 /// A tenant that cannot be re-provisioned, with the reasons why.
 type Skip = (String, Vec<String>);
 
-/// Split `<name> <reap-after>` lines into the tenants to re-provision with
+/// Split `<name> <cleanup label>` lines into the tenants to re-provision with
 /// their capacity, the ones that cannot be (which abort the run), and the
 /// suspended ones. A suspended tenant is never re-provisioned, which would
-/// restart it before its reap, and aborts nothing.
+/// restart it before Kyverno deletes it, and aborts nothing.
 fn reprovision_plan(
     kubectl_out: &str,
     capacity: impl Fn(&str) -> Option<String>,
@@ -392,6 +369,8 @@ fn summarize_failures(cluster: &[String], tenants: &[(String, Vec<String>)]) -> 
 
 // -- shell wrappers (read-only) --
 
+const TENANT_NAMESPACES_JSONPATH: &str = "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.metadata.labels.cleanup\\.kyverno\\.io/ttl}{\"\\n\"}{end}";
+
 fn kubectl_tenant_namespaces() -> Result<String, String> {
     run_output(
         "kubectl",
@@ -401,7 +380,7 @@ fn kubectl_tenant_namespaces() -> Result<String, String> {
             "-l",
             command::TENANT_SELECTOR,
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.metadata.annotations.sycophant\\.md/reap-after}{\"\\n\"}{end}",
+            TENANT_NAMESPACES_JSONPATH,
         ],
     )
     .map_err(|e| format!("aborting: cannot list tenant namespaces ({e}); nothing applied"))
@@ -515,10 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn a_suspended_tenant_is_left_out_of_the_reprovision_plan() {
-        // An active tenant has no reap-after, so its line ends after the name.
+    fn the_reprovision_plan_reads_the_ttl_label_and_skips_suspended_tenants() {
+        assert!(
+            TENANT_NAMESPACES_JSONPATH.contains("{.metadata.labels.cleanup\\.kyverno\\.io/ttl}"),
+            "{TENANT_NAMESPACES_JSONPATH}"
+        );
+        // An active tenant has no cleanup label, so its line ends after the name.
         let (plans, skipped, suspended) =
-            reprovision_plan("tenant-active \ntenant-gone 2026-11-01T00:00:00Z\n", |_| {
+            reprovision_plan("tenant-active \ntenant-gone 2026-11-01T000000Z\n", |_| {
                 Some("s".to_string())
             });
         assert_eq!(plans, vec![("tenant-active".to_string(), "s".to_string())]);

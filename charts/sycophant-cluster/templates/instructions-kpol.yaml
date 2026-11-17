@@ -79,6 +79,4 @@ curl -fsS -X DELETE "${FOLDER}?recursive=true"
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "instructions" "role" "instructions-job" "script" (include "sycophant.instructionsInstallScript" $)) }}
 ---
 {{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "instructions" "role" "instructions-job" "script" (include "sycophant.instructionsUninstallScript" $)) }}
----
-{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "instructions") }}
 {{- end }}

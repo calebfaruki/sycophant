@@ -1501,7 +1501,8 @@ verify_instructions_delivery() {
 # ---- tenant lifecycle command-contract proof ----
 # Provision drives the tenant Namespace, quota, and base install; agent and
 # toolset provision commands each drive one release; suspend scales the tenant
-# down, and remove's zero keepalive stamps the reap TTL the reap policy acts on.
+# down and sets its cleanup label, and remove's zero keepalive sets a cleanup
+# time Kyverno acts on at once.
 
 # The digest image the lifecycle toolset provision command for toolset $1
 # carries. No tool is called, so nothing pulls it.
@@ -1521,7 +1522,7 @@ toolset_values() {
 lifecycle_tenant_up() {
   local work="$1"
   # Start from nothing, so the proof covers a first provision. A prior run's
-  # installer outlives its reap TTL.
+  # tenant can outlive its cleanup time until its instruction folders go.
   local stale
   stale="$(tenant_ns_named "$LIFECYCLE_TENANT_NAME")"
   if [ -n "$stale" ]; then
@@ -1612,24 +1613,36 @@ lifecycle_tenant_down() {
   kubectl apply -n "$LIFECYCLE_TENANT_NS" \
     -f "$REPO_ROOT/tests/fixtures/lifecycle/workload.yaml" >/dev/null
 
-  # `sycoadm tenant down` suspends with no keepalive; `sycoadm tenant remove`
-  # re-writes the suspend command with keepalive 0.
-  "$SYCOADM" tenant down "$LIFECYCLE_TENANT_NAME"
+  # `sycoadm tenant down` must carry a keepalive. 30 days keeps the tenant
+  # for the rest of the proof.
+  "$SYCOADM" tenant down "$LIFECYCLE_TENANT_NAME" --keepalive 30
   wait_for "tenant deployments scaled to zero" 120 \
     "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o \
       jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0" ||
     exit 1
   ok "sycoadm tenant down scaled the tenant deployments to zero"
+  wait_for "cleanup label set on the namespace" 120 \
+    "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o \
+      jsonpath='{.metadata.labels.cleanup\.kyverno\.io/ttl}' \
+      2>/dev/null | grep -q ." ||
+    exit 1
+  ok "sycoadm tenant down set the cleanup label"
+
+  # With self-service on, a suspended tenant refuses the suspend that
+  # `sycoadm tenant remove` writes, so lift the suspension as admin first.
+  kubectl label namespace "$LIFECYCLE_TENANT_NS" cleanup.kyverno.io/ttl- \
+    >/dev/null
+  kubectl delete configmap suspend-tenant -n "$LIFECYCLE_TENANT_NS" >/dev/null
 }
 
 lifecycle_tenant_remove() {
   "$SYCOADM" tenant remove "$LIFECYCLE_TENANT_NAME"
-  wait_for "reap-after TTL stamped on the namespace" 120 \
+  wait_for "sycoadm tenant remove set the cleanup label" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o \
-      jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' \
+      jsonpath='{.metadata.labels.cleanup\.kyverno\.io/ttl}' \
       2>/dev/null | grep -q ." ||
     exit 1
-  ok "sycoadm tenant remove stamped the reap TTL"
+  ok "sycoadm tenant remove set the cleanup label"
 }
 
 verify_tenant_lifecycle() {

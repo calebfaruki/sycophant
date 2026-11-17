@@ -30,31 +30,39 @@ EOF
   done
 }
 
-# Tenant namespaces whose reap-after instant has passed. The fraction Kyverno
-# writes is dropped, since fromdateiso8601 parses whole seconds only. A value
-# that does not parse never expires.
+# Tenant namespaces being deleted that sycophant.md/tenant-data still holds,
+# each with the finalizer's index.
 # Captured first: a failed list piped straight into jq would read as no tenants.
 list="$(kubectl get namespaces -l app.kubernetes.io/part-of=sycophant-tenant -o json)" || exit 1
-expired="$(printf '%s' "$list" | jq -r '.items[]
-    | select((.metadata.annotations["{{ include "sycophant.reapAfterAnnotation" . }}"] // "")
-        | try ((sub("\\.[0-9]+"; "") | fromdateiso8601) < now) catch false)
-    | .metadata.name')" || exit 1
+held="$(printf '%s' "$list" | jq -r '.items[]
+    | select(.metadata.deletionTimestamp != null)
+    | .metadata.name as $ns
+    | ((.metadata.finalizers // []) | index("sycophant.md/tenant-data")) as $i
+    | select($i != null)
+    | "\($ns) \($i)"')" || exit 1
 
-for ns in $expired; do
+while read -r ns i; do
+  [ -n "$ns" ] || continue
   if ! reap_files "$ns"; then
     echo "$ns: instruction folders not deleted; retrying next run" >&2
     RC=1
     continue
   fi
-  kubectl delete configmap "${ns#{{ include "sycophant.tenantNsPrefix" . }}}" -n sycophant-entitlements --ignore-not-found \
-    && kubectl delete namespace "$ns" --wait=false \
+{{- if include "sycophant.selfService" . }}
+  if ! kubectl delete configmap "${ns#{{ include "sycophant.tenantNsPrefix" . }}}" -n sycophant-entitlements --ignore-not-found; then
+    RC=1
+    continue
+  fi
+{{- end }}
+  kubectl patch namespace "$ns" --type=json -p "[
+    {\"op\": \"test\", \"path\": \"/metadata/finalizers/$i\", \"value\": \"sycophant.md/tenant-data\"},
+    {\"op\": \"remove\", \"path\": \"/metadata/finalizers/$i\"}]" \
     || RC=1
-done
+done <<EOF
+$held
+EOF
 exit "$RC"
 {{- end -}}
-{{- if include "sycophant.selfService" . }}
-# The DeletingPolicy cannot reap a tenant's instruction folders, because it
-# only deletes cluster objects.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -73,7 +81,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list", "delete"]
+    verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -89,6 +97,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: reap-tenant-files
+{{- if include "sycophant.selfService" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -117,9 +126,12 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: reap-tenant-files
+{{- end }}
 ---
-# The reaper reads tenant-controlled folder names, so a flaw in it must not
-# reach other namespaces. A VAP has no clock, so the date stays the script's.
+# The cleaner reads tenant-controlled folder names, so a flaw in it must not
+# reach other namespaces. It may only remove sycophant.md/tenant-data from a
+# tenant namespace already being deleted. managedFields, resourceVersion and
+# generation are not compared, because the server sets them on every write.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -132,7 +144,7 @@ spec:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["DELETE"]
+        operations: ["UPDATE"]
         resources: ["namespaces"]
   matchConditions:
     - name: sender-is-the-reaper
@@ -140,9 +152,20 @@ spec:
         request.userInfo.?username.orValue('') == 'system:serviceaccount:sycophant-system:reap-tenant-files'
   validations:
     - expression: >-
-        oldObject.metadata.?labels['app.kubernetes.io/part-of'].orValue('') == 'sycophant-tenant' &&
-        oldObject.metadata.?annotations['{{ include "sycophant.reapAfterAnnotation" . }}'].orValue('') != ''
-      message: "the reaper may delete only a tenant namespace carrying sycophant.md/reap-after"
+        (oldObject.metadata.?labels['app.kubernetes.io/part-of'].orValue('') == 'sycophant-tenant' &&
+         has(oldObject.metadata.deletionTimestamp) &&
+         'sycophant.md/tenant-data' in oldObject.metadata.?finalizers.orValue([]))
+      message: "the tenant file cleaner may only change a tenant namespace that is being deleted and holds sycophant.md/tenant-data"
+    - expression: >-
+        object.metadata.?finalizers.orValue([]) ==
+          oldObject.metadata.finalizers.filter(f, f != 'sycophant.md/tenant-data')
+      message: "the tenant file cleaner may only remove sycophant.md/tenant-data from the finalizers"
+    - expression: >-
+        (object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+         object.metadata.?annotations.orValue({}) == oldObject.metadata.?annotations.orValue({}) &&
+         object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+         object.metadata.?generateName == oldObject.metadata.?generateName)
+      message: "the tenant file cleaner may not change a namespace's labels, annotations, ownerReferences or generateName"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -254,4 +277,3 @@ spec:
             - name: tmp
               emptyDir: {}
             {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 12 }}
-{{- end }}

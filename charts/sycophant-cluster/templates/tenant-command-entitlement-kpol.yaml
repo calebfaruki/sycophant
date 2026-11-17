@@ -36,7 +36,7 @@ spec:
   validations:
     - expression: >-
         variables.ns == null ||
-        variables.ns.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("") == ""
+        variables.ns.metadata.?labels["{{ include "sycophant.cleanupTtlLabel" . }}"].orValue("") == ""
       message: "a tenant command is refused while its tenant is suspended"
     - expression: >-
         variables.isOperator ||

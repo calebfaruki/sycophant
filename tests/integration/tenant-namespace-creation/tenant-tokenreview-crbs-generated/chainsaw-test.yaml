@@ -62,22 +62,13 @@ spec:
                   (length(apiGroups) == `1`): true
                   (length(resources) == `1`): true
                   (length(verbs) == `1`): true
-    - name: create-labeled-ns
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              kubectl create namespace "$TENANT_NS"
-              kubectl label namespace "$TENANT_NS" \
-                app.kubernetes.io/part-of=sycophant-tenant \
-                pod-security.kubernetes.io/enforce=restricted \
-                pod-security.kubernetes.io/enforce-version=latest \
-                pod-security.kubernetes.io/warn=restricted \
-                pod-security.kubernetes.io/audit=restricted \
-                --overwrite
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
     - name: assert-relay-tokenreview-crb
       try:
         - assert:
@@ -151,32 +142,3 @@ spec:
             apiVersion: admissionregistration.k8s.io/v1
             kind: ValidatingAdmissionPolicyBinding
             name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
-    - name: teardown
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
-              kubectl delete clusterrolebinding \
-                "${TENANT_NS}-relay-tokenreview" \
-                "${TENANT_NS}-dispatch-tokenreview" \
-                --ignore-not-found
-              kubectl delete validatingadmissionpolicybinding \
-                "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found
-  catch:
-    - script:
-        env:
-          - name: TENANT_NS
-            value: ($tenant_ns)
-        content: |
-          set -euo pipefail
-          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
-          kubectl delete clusterrolebinding \
-            "${TENANT_NS}-relay-tokenreview" \
-            "${TENANT_NS}-dispatch-tokenreview" \
-            --ignore-not-found
-          kubectl delete validatingadmissionpolicybinding \
-            "${TENANT_NS}-sycophant-pod-binding" --ignore-not-found

@@ -32,15 +32,34 @@ render --set selfService.enabled=true \
   exit 1
 }
 
+# Runs the check on stdin against both renders. The check defines
+# problems(docs, mode) and returns what is wrong.
+each_mode() {
+  local verdict
+  verdict="$(
+    python3 - "$WORK/off.yaml" "$WORK/on.yaml" 2>&1 <<PY
+import json, sys, yaml
+CLEANER = "reap-tenant-files"
+$(cat)
+def run(path, mode):
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    return [f"{mode} render: {p}" for p in problems(docs, mode)]
+print("; ".join(run(sys.argv[1], "off") + run(sys.argv[2], "on")))
+PY
+  )"
+  if [ -n "$verdict" ]; then
+    bad "$1" "$verdict"
+  else
+    ok "$1"
+  fi
+}
+
 # Parsed documents, not a text search: comments in the default render name
 # some of these objects.
 t_setting_off_renders_no_self_service_object() {
-  local verdict
-  verdict="$(
-    python3 - "$WORK/off.yaml" "$WORK/on.yaml" 2>&1 <<'PY'
-import sys, yaml
+  each_mode setting_off_renders_no_self_service_object <<'PY'
 # Must name every object the setting adds. The off-render check sees only these.
-want = {tuple(l.split()) for l in """
+WANT = {tuple(l.split()) for l in """
 Role tenant-admins
 RoleBinding tenant-admins
 ValidatingAdmissionPolicy tenant-admins-system-configmaps
@@ -55,43 +74,23 @@ ValidatingAdmissionPolicy dex-password-id-is-name
 ServiceAccount dex-password-writer
 Role dex-password-writer
 RoleBinding dex-password-writer
-CronJob reap-tenant-files
-ServiceAccount reap-tenant-files
-ClusterRole reap-tenant-files
-ClusterRoleBinding reap-tenant-files
 Role reap-tenant-files
 RoleBinding reap-tenant-files
-ValidatingAdmissionPolicy reap-tenant-files-namespace-scope
-CiliumNetworkPolicy reap-tenant-files-egress
 """.splitlines() if l.strip()}
-policies = {n for k, n in want if k == "ValidatingAdmissionPolicy"}
-def shipped(path):
-    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+POLICIES = {n for k, n in WANT if k == "ValidatingAdmissionPolicy"}
+def problems(docs, mode):
     names = {(d["kind"], d["metadata"]["name"]) for d in docs}
-    bound = {d["spec"]["policyName"] for d in docs
-            if d["kind"] == "ValidatingAdmissionPolicyBinding"
-              and d["spec"].get("policyName") in policies}
-    return names, bound
-off, off_bound = shipped(sys.argv[1])
-on, on_bound = shipped(sys.argv[2])
-problems = []
-if want & off:
-    problems.append(f"default render ships {sorted(want & off)}")
-if off_bound:
-    problems.append(f"default render binds {sorted(off_bound)}")
-if want - on:
-    problems.append(f"setting-on render lacks {sorted(want - on)}")
-if policies - on_bound:
-    problems.append(
-        f"setting-on render does not bind {sorted(policies - on_bound)}")
-print("; ".join(problems))
+    bound = {
+        d["spec"]["policyName"] for d in docs
+        if d["kind"] == "ValidatingAdmissionPolicyBinding"
+        and d["spec"].get("policyName") in POLICIES}
+    if mode == "off":
+        return ([f"ships {sorted(WANT & names)}"] * bool(WANT & names)
+                + [f"binds {sorted(bound)}"] * bool(bound))
+    return ([f"lacks {sorted(WANT - names)}"] * bool(WANT - names)
+            + [f"does not bind {sorted(POLICIES - bound)}"]
+            * bool(POLICIES - bound))
 PY
-  )"
-  if [ -n "$verdict" ]; then
-    bad setting_off_renders_no_self_service_object "$verdict"
-  else
-    ok setting_off_renders_no_self_service_object
-  fi
 }
 
 t_operator_fails_render() {
@@ -107,28 +106,22 @@ t_operator_fails_render() {
 }
 
 t_setting_on_maps_one_constant_group() {
-  local verdict
-  verdict="$(
-    python3 - "$WORK/on.yaml" 2>&1 <<'PY'
-import sys, yaml
-cm = next(d for d in yaml.safe_load_all(open(sys.argv[1]))
-          if d and "auth-config.yaml" in d.get("data", {}))
-doc = yaml.safe_load(cm["data"]["auth-config.yaml"])
-groups = doc["jwt"][0]["claimMappings"].get("groups")
-expr = (groups or {}).get("expression", "")
-if groups != {"expression": expr}:
-    print(f"groups must hold one expression and no claim or prefix: {groups}")
-elif expr != "'sycophant:tenant-admins'":
-    print(
-        "the group expression must be the literal "
-        f"'sycophant:tenant-admins': {expr}")
+  each_mode setting_on_maps_one_constant_group <<'PY'
+def problems(docs, mode):
+    if mode == "off":
+        return []
+    cm = next(d for d in docs if "auth-config.yaml" in d.get("data", {}))
+    doc = yaml.safe_load(cm["data"]["auth-config.yaml"])
+    groups = doc["jwt"][0]["claimMappings"].get("groups")
+    expr = (groups or {}).get("expression", "")
+    if groups != {"expression": expr}:
+        return [f"groups must hold one expression and no claim or prefix: "
+                f"{groups}"]
+    if expr != "'sycophant:tenant-admins'":
+        return ["the group expression must be the literal "
+                f"'sycophant:tenant-admins': {expr}"]
+    return []
 PY
-  )"
-  if [ -n "$verdict" ]; then
-    bad setting_on_maps_one_constant_group "$verdict"
-  else
-    ok setting_on_maps_one_constant_group
-  fi
 }
 
 t_dex_password_id_must_be_its_name() {
@@ -181,38 +174,114 @@ for i, d in enumerate(d for d in yaml.safe_load_all(sys.stdin) if d):
 }
 
 t_owner_grant_fires_on_the_marker() {
-  local verdict
-  verdict="$(
-    python3 - "$WORK/on.yaml" 2>&1 <<'PY'
-import json, sys, yaml
-docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-pol = (next((d for d in docs if d["kind"] == "GeneratingPolicy"
-              and d["metadata"]["name"] == "provision-tenant-owner"), None))
-problems = []
-if pol is None:
-    print("no GeneratingPolicy provision-tenant-owner")
-    sys.exit()
-mc = pol["spec"].get("matchConstraints") or {}
-rules = mc.get("resourceRules") or []
-if ([(r.get("resources"), r.get("operations"), r.get("resourceNames"))
-      for r in rules] != [(["configmaps"], ["CREATE"],
-                            ["provision-tenant-owner"])]):
-    problems.append(
-        f"must match only CREATE of configmap provision-tenant-owner: {rules}")
-labels = (mc.get("namespaceSelector") or {}).get("matchLabels") or {}
-if labels.get("app.kubernetes.io/part-of") != "sycophant-tenant":
-    problems.append(
-        f"must select only tenant namespaces: {mc.get('namespaceSelector')}")
-if "sh.helm.release" in json.dumps(pol):
-    problems.append("reads Helm's release record")
-print("; ".join(problems))
+  each_mode owner_grant_fires_on_the_marker <<'PY'
+def problems(docs, mode):
+    if mode == "off":
+        return []
+    pol = next((d for d in docs if d["kind"] == "GeneratingPolicy"
+                and d["metadata"]["name"] == "provision-tenant-owner"), None)
+    if pol is None:
+        return ["no GeneratingPolicy provision-tenant-owner"]
+    out = []
+    mc = pol["spec"].get("matchConstraints") or {}
+    rules = mc.get("resourceRules") or []
+    want = [(["configmaps"], ["CREATE"], ["provision-tenant-owner"])]
+    got = [
+        (r.get("resources"), r.get("operations"), r.get("resourceNames"))
+        for r in rules]
+    if got != want:
+        out.append(
+            f"must match only CREATE of configmap {want[0][2][0]}: {rules}")
+    selector = mc.get("namespaceSelector") or {}
+    labels = selector.get("matchLabels") or {}
+    if labels.get("app.kubernetes.io/part-of") != "sycophant-tenant":
+        out.append(f"must select only tenant namespaces: {selector}")
+    if "sh.helm.release" in json.dumps(pol):
+        out.append("reads Helm's release record")
+    return out
 PY
-  )"
-  if [ -n "$verdict" ]; then
-    bad owner_grant_fires_on_the_marker "$verdict"
-  else
-    ok owner_grant_fires_on_the_marker
-  fi
+}
+
+t_only_ttl_cleanup_renders_in_every_mode() {
+  each_mode only_ttl_cleanup_renders_in_every_mode <<'PY'
+AGGREGATE = "rbac.kyverno.io/aggregate-to-cleanup-controller"
+LABELLED = {"namespaces": "", "serviceaccounts": "",
+            "roles": "rbac.authorization.k8s.io",
+            "rolebindings": "rbac.authorization.k8s.io"}
+def problems(docs, mode):
+    out = []
+    deleting = sorted(d["metadata"]["name"] for d in docs
+                      if d["kind"] == "DeletingPolicy")
+    if deleting:
+        out.append(f"ships DeletingPolicy {deleting}")
+    if "reap-after" in json.dumps(docs):
+        out.append("names reap-after")
+    rules = [
+        r for d in docs if d["kind"] == "ClusterRole"
+        and (d["metadata"].get("labels") or {}).get(AGGREGATE) == "true"
+        for r in d.get("rules") or []]
+    for res, group in LABELLED.items():
+        verbs = {
+            v for r in rules if res in (r.get("resources") or [])
+            and group in (r.get("apiGroups") or []) for v in r["verbs"]}
+        lack = {"list", "watch", "delete"} - verbs
+        if lack:
+            out.append(f"the cleanup controller lacks {sorted(lack)} on {res}")
+    return out
+PY
+}
+
+t_cleaner_ships_in_every_mode() {
+  each_mode cleaner_ships_in_every_mode <<'PY'
+SCOPE = f"{CLEANER}-namespace-scope"
+def problems(docs, mode):
+    names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+    out = []
+    lack = sorted({
+        ("CronJob", CLEANER), ("ServiceAccount", CLEANER),
+        ("ClusterRole", CLEANER), ("ClusterRoleBinding", CLEANER),
+        ("ValidatingAdmissionPolicy", SCOPE),
+        ("CiliumNetworkPolicy", f"{CLEANER}-egress")} - names)
+    if lack:
+        out.append(f"lacks the tenant file cleaner's {lack}")
+    if not any(
+        d["kind"] == "ValidatingAdmissionPolicyBinding"
+        and d["spec"].get("policyName") == SCOPE for d in docs):
+        out.append(f"does not bind {SCOPE}")
+    return out
+PY
+}
+
+t_cleaner_only_gets_lists_and_patches_namespaces() {
+  each_mode cleaner_only_gets_lists_and_patches_namespaces <<'PY'
+def problems(docs, mode):
+    role = next((
+        d for d in docs if d["kind"] == "ClusterRole"
+        and d["metadata"]["name"] == CLEANER), None)
+    want = [{
+        "apiGroups": [""], "resources": ["namespaces"],
+        "verbs": ["get", "list", "patch"]}]
+    if role is not None and role.get("rules") != want:
+        return [f"ClusterRole {CLEANER} rules are {role.get('rules')}"]
+    return []
+PY
+}
+
+t_cleaner_deletes_records_only_when_on() {
+  each_mode cleaner_deletes_records_only_when_on <<'PY'
+def problems(docs, mode):
+    cron = next((
+        d for d in docs if d["kind"] == "CronJob"
+        and d["metadata"]["name"] == CLEANER), None)
+    if cron is None:
+        return []
+    spec = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    script = spec["containers"][0]["args"][0]
+    if ("sycophant-entitlements" in script) != (mode == "on"):
+        return ["the cleaner's entitlement-record delete must ship "
+                "only with the setting on"]
+    return []
+PY
 }
 
 t_setting_off_renders_no_self_service_object
@@ -223,5 +292,9 @@ t_setting_on_maps_one_constant_group
 t_dex_password_id_must_be_its_name
 t_setting_on_kyverno_policies_compile
 t_owner_grant_fires_on_the_marker
+t_only_ttl_cleanup_renders_in_every_mode
+t_cleaner_ships_in_every_mode
+t_cleaner_only_gets_lists_and_patches_namespaces
+t_cleaner_deletes_records_only_when_on
 
 summary

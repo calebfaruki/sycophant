@@ -97,19 +97,19 @@ pub(crate) enum TenantSub {
     Secret(SecretCmd),
 }
 
-/// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
-/// operator password
+/// Suspend the tenant: scales it to zero and keeps its data for the keepalive.
+/// Prompts for the operator password
 #[derive(Args)]
 pub(crate) struct TenantDown {
     /// the tenant's chosen name or its namespace
     pub name: String,
-    /// days to keep the suspended tenant before the cluster reaps it
+    /// days to keep the suspended tenant before the cluster deletes it (0, 30, 60, 90)
     #[arg(long)]
-    pub keepalive: Option<String>,
+    pub keepalive: String,
 }
 
-/// Delete the tenant completely, including its PVCs/data (irreversible). The
-/// cluster reaps it on its next sweep. Prompts for the operator password
+/// Delete the tenant completely, including its PVCs/data (irreversible).
+/// Prompts for the operator password
 #[derive(Args)]
 pub(crate) struct TenantRemove {
     /// the tenant's chosen name or its namespace
@@ -325,6 +325,14 @@ mod tests {
                 "--set-string",
                 "toolset.tenant=t"
             ]
+        );
+    }
+
+    #[test]
+    fn tenant_down_requires_a_keepalive() {
+        assert!(Cli::try_parse_from(["sycoadm", "tenant", "down", "x"]).is_err());
+        assert!(
+            Cli::try_parse_from(["sycoadm", "tenant", "down", "x", "--keepalive", "30"]).is_ok()
         );
     }
 }

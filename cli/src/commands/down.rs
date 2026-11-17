@@ -4,10 +4,10 @@ use crate::commands::operator::Operator;
 use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
-/// `sycoadm tenant down <name> [--keepalive <days>]` — write the suspend command.
+/// `sycoadm tenant down <name> --keepalive <days>` — write the suspend command.
 /// The cluster scales every tenant Deployment to zero and keeps the release,
-/// PVCs, and secrets. Use `sycoadm tenant remove <name>` to remove data.
-pub(crate) fn run(scope: &Scope, keepalive: Option<&str>) -> Result<(), String> {
+/// PVCs, and secrets until the keepalive passes.
+pub(crate) fn run(scope: &Scope, keepalive: &str) -> Result<(), String> {
     let ns = scope.release_name()?;
 
     if !run_silent("kubectl", &["get", "namespace", &ns]) {

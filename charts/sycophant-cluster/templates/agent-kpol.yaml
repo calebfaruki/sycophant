@@ -1,7 +1,6 @@
 {{- /*
 The agent lifecycle: the provision-agent installer and its grant, the
-uninstall-agent reactor on a reap command, and the reap of both identities'
-ServiceAccounts and RoleBindings.
+uninstall-agent reactor on a reap command.
 */}}
 {{- if include "sycophant.renderKyverno" . }}
 ---
@@ -16,6 +15,4 @@ for SA in $SUBS; do
   helm uninstall "${SA#serviceaccount/}" -n "$TENANT" --timeout 10m
 done` }}
 {{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "agent" "script" (include "sycophant.provisionUninstallScript" (dict "kind" "agent" "beforeUninstall" $subAgents))) }}
----
-{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "agent") }}
 {{- end }}

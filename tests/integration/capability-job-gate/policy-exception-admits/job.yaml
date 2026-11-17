@@ -1,0 +1,15 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: NAME
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: attacker-sa
+      containers:
+        - name: probe
+          image: registry.k8s.io/pause:3.9

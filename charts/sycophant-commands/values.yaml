@@ -12,7 +12,7 @@
 #   ownerHash: ""           # set by sycoadm
 #   hash: ""                # set by sycoadm for an existing tenant
 #   capacity: 2Gi           # provision: the tenant's memory quota
-#   keepalive: 30           # suspend: days kept before reap (0, 30, 60, 90); unset keeps it
+#   keepalive: 30           # suspend: days kept before the cluster deletes it (0, 30, 60, 90)
 
 # inference:
 #   name: deepseek

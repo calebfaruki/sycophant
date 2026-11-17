@@ -31,19 +31,15 @@ spec:
             content: |
               set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              vap=$(mktemp); rc=$(mktemp)
+              vap=$(mktemp)
               helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
                 -n sycophant-system --api-versions policies.kyverno.io/v1/ValidatingPolicy > "$vap"
-              helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system \
-                --api-versions policies.kyverno.io/v1/ValidatingPolicy > "$rc"
 
-              python3 - "$vap" "$rc" <<'PY'
+              python3 - "$vap" <<'PY'
               import sys, yaml
-              vap_docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-              rc_docs  = [d for d in yaml.safe_load_all(open(sys.argv[2])) if d]
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 
-              vaps = [d for d in vap_docs if d.get("kind") == "ValidatingAdmissionPolicy"
+              vaps = [d for d in docs if d.get("kind") == "ValidatingAdmissionPolicy"
                       and d["metadata"]["name"] == "cluster-gvisor-pod-policy"]
               assert vaps, "cluster-gvisor-pod-policy VAP did not render"
               exprs = [v.get("expression", "") for v in vaps[0]["spec"].get("validations", [])]
@@ -64,7 +60,7 @@ spec:
               for kind in safe:
                   assert kind in vr, f"capability-job volume allowlist must permit {kind}, got: {vr}"
 
-              rcs = [d for d in rc_docs if d.get("kind") == "MutatingPolicy"
+              rcs = [d for d in docs if d.get("kind") == "MutatingPolicy"
                      and d["metadata"]["name"] == "cluster-runtime-class"]
               assert rcs, "cluster-runtime-class MutatingPolicy did not render"
               # Walk the loaded policy for the component matchExpression and

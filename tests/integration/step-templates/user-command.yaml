@@ -25,10 +25,9 @@ spec:
           - name: EXPECT
             value: ($expect)
         content: |
-          set -euo pipefail
-          ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-          USER_SUB="${ISSUER}#${SUB}"
-          HASH=$(printf '%s' "$USER_SUB" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+          . ../../../self-service/lib.sh
+          USER_SUB=$(user "$SUB")
+          HASH=$(hex10 "$USER_SUB")
           err=$(kubectl create configmap "provision-user-$HASH" -n "$TENANT_NS" \
             --from-literal=user="$USER_SUB" \
             --from-literal=agents="$AGENTS" \

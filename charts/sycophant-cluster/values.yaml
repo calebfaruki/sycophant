@@ -43,8 +43,7 @@ selfService:
   enabled: false
   # operator: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#<sub>
 
-# How often the tenant reap runs. Standard 5-field cron; Kyverno's minimum
-# granularity is 1 minute, so `* * * * *` is the floor. The default keeps
-# production sweeps sparse; e2e overrides it to reap promptly.
+# How often the tenant file cleaner runs. Standard 5-field cron. The default
+# keeps production runs sparse; e2e overrides it to clean up promptly.
 reap:
   schedule: "*/10 * * * *"

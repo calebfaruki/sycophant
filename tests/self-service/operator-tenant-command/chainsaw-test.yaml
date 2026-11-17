@@ -36,5 +36,4 @@ spec:
             content: |
               . ../lib.sh
               T=$(tenant_hash "$OPERATOR" "Operator $TOKEN")
-              kubectl delete configmap "provision-tenant-$T" -n sycophant-system --ignore-not-found
-              kubectl delete namespace "tenant-$T" --ignore-not-found --wait=false
+              drop_tenant "$T"

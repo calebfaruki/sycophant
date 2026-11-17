@@ -1,13 +1,10 @@
 {{- /*
 The user lifecycle: the provision-user installer and its grant, the
-uninstall-user reactor on a reap command, and the reap of both identities'
-ServiceAccounts and RoleBindings.
+uninstall-user reactor on a reap command.
 */}}
 {{- if include "sycophant.renderKyverno" . }}
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "user") }}
 ---
 {{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "user") }}
----
-{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "user") }}
 {{- end }}

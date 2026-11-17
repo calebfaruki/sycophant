@@ -3,14 +3,28 @@ kind: Test
 metadata:
   name: reaper-delete-scope
 spec:
+  # Suspends the tenant file cleaner, so it runs alone.
+  concurrent: false
   description: >
-    The instruction-file reaper, which RBAC lets delete any namespace, cannot
-    delete one that is not a tenant namespace carrying sycophant.md/reap-after.
+    The tenant file cleaner's only verbs on namespaces are get, list and
+    patch, and it holds no verb on any namespaces subresource. Its admission
+    policy refuses a finalizer removal on an active tenant namespace, the
+    removal of sycophant.md/tenant-data from a non-tenant namespace that is
+    being deleted, and that removal sent together with a label change on a
+    tenant namespace that is being deleted. Removing only
+    sycophant.md/tenant-data from that namespace is admitted and leaves its
+    other finalizer.
   bindings:
     - name: token
       value: (random('[a-z0-9]{8}'))
   steps:
-    - name: the-reaper-cannot-delete-another-namespace
+    - name: the-cleaner-only-gets-lists-and-patches-namespaces
+      try:
+        - script:
+            content: |
+              . ../lib.sh
+              [ "$(extra_rules default "$CLEANER")" = "namespaces [] [] [get list patch]" ] || { echo "the cleaner holds unexpected rules"; exit 1; }
+    - name: the-cleaner-may-change-no-active-tenant-or-non-tenant-namespace
       try:
         - script:
             env:
@@ -18,17 +32,70 @@ spec:
                 value: ($token)
             content: |
               . ../lib.sh
-              NS="rds-$TOKEN"
-              kubectl create namespace "$NS" >/dev/null
-              refused "the reaper may delete only a tenant namespace carrying sycophant.md/reap-after" \
-                "the reaper's delete of a non-tenant namespace" \
-                kubectl delete namespace "$NS" --as=system:serviceaccount:sycophant-system:reap-tenant-files
-              [ "$(kubectl get namespace "$NS" -o jsonpath='{.status.phase}')" = Active ] \
-                || { echo "$NS is no longer active"; exit 1; }
+              NS="tenant-rdsa$TOKEN"
+              tenant_ns "$NS" "$(user "alice-$TOKEN")" | kubectl apply -f - >/dev/null
+              refused "may only change a tenant namespace that is being deleted" "the cleaner's finalizer removal on an active tenant namespace" \
+                cleaner_unfinalize "$NS"
+              NS="rdsn-$TOKEN"
+              printf '%s\n' 'apiVersion: v1' 'kind: Namespace' 'metadata:' "  name: $NS" \
+                '  finalizers: ["sycophant.md/tenant-data"]' | kubectl apply -f - >/dev/null
+              kubectl delete namespace "$NS" --wait=false >/dev/null
+              [ -n "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.deletionTimestamp}')" ] \
+                || { echo "$NS is not being deleted"; exit 1; }
+              refused "may only change a tenant namespace that is being deleted" "the cleaner's finalizer removal on a non-tenant namespace being deleted" \
+                cleaner_unfinalize "$NS"
       cleanup:
         - script:
             env:
               - name: TOKEN
                 value: ($token)
             content: |
-              kubectl delete namespace "rds-$TOKEN" --ignore-not-found --wait=false
+              . ../lib.sh
+              drop_ns "tenant-rdsa$TOKEN"; drop_ns "rdsn-$TOKEN"
+    - name: a-tenant-namespace-being-deleted-admits-only-the-bare-finalizer-removal
+      try:
+        - script:
+            timeout: 180s
+            content: |
+              . ../lib.sh
+              # The cleaner would remove the finalizer itself, so stop it and
+              # wait out any run in progress.
+              kubectl patch cronjob reap-tenant-files -n sycophant-system --type=merge -p '{"spec":{"suspend":true}}' >/dev/null
+              for i in $(seq 1 60); do
+                n=$(cleaner_jobs | jq '[.[]
+                  | select([.status.conditions[]? | select((.type == "Complete" or .type == "Failed") and .status == "True")] | length == 0)]
+                  | length')
+                [ "$n" = 0 ] && break
+                sleep 2
+              done
+              [ "$n" = 0 ] || { echo "a tenant file cleaner run is still unfinished"; exit 1; }
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              NS="tenant-rdsd$TOKEN"
+              tenant_ns "$NS" "$(user "alice-$TOKEN")" | kubectl apply -f - >/dev/null
+              kubectl patch namespace "$NS" --type=json \
+                -p '[{"op":"add","path":"/metadata/finalizers/-","value":"example.com/hold"}]' >/dev/null
+              kubectl delete namespace "$NS" --wait=false >/dev/null
+              [ -n "$(kubectl get namespace "$NS" -o jsonpath='{.metadata.deletionTimestamp}')" ] \
+                || { echo "$NS is not being deleted"; exit 1; }
+              refused "may not change a namespace's labels" "the cleaner's finalizer removal sent with a label change" \
+                cleaner_unfinalize "$NS" '{"op":"add","path":"/metadata/labels/rds-probe","value":"x"}'
+              cleaner_unfinalize "$NS" >/dev/null \
+                || { echo "the cleaner's bare removal of sycophant.md/tenant-data was refused"; exit 1; }
+              F=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.finalizers}')
+              [ "$F" = '["example.com/hold"]' ] || { echo "$NS's finalizers are $F after the removal"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              . ../lib.sh
+              drop_ns "tenant-rdsd$TOKEN"
+        - script:
+            content: |
+              kubectl patch cronjob reap-tenant-files -n sycophant-system --type=merge -p '{"spec":{"suspend":false}}' >/dev/null

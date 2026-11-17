@@ -10,8 +10,8 @@
 crds:
   install: false
 
-# The tenant reap DeletingPolicy is served by the cleanup controller and by
-# nothing else, so it must run. Reports stay off: no sycophant policy evaluates
+# The cleanup controller deletes objects carrying the cleanup label, so it
+# must run. Reports stay off: no sycophant policy evaluates
 # in background and nothing consumes PolicyReports, so that controller is idle
 # dead weight.
 cleanupController:
